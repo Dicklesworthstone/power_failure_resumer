@@ -42,7 +42,7 @@ A power cut leaves a forensic signature: every process that was mid-write stops 
 | Tab order | Live status-log tab, agent-mail tab, hub projects, then the rest |
 | Titles + previews | Each session shows its title and first user message, so you know what you're resuming |
 | Doctor | `pfr --doctor` catches missing permissions and dependencies before they waste a recovery |
-| Offline tests | 11 suites against generated fixtures; no Ghostty, network, or live agents needed |
+| Offline tests | 15 suites against generated fixtures, including an install→run e2e through the real installer and launcher; no Ghostty, network, or live agents needed |
 
 ## Quick example
 
@@ -316,7 +316,7 @@ cp -R skills/pfr ~/.claude/skills/pfr
 
 Regenerates mtime-bearing fixtures (git cannot store mtimes), then runs `tests/test_*.sh`, `tests/test_*.py`, and `tests/e2e_*.sh` in name order, writing NDJSON events and per-test output under `tests/logs/` (last 50 lines dumped on failure). The default run is fully offline against fixture roots, `--fake-boot`, and canned `--ps-file` tables: no live Ghostty, no network, no writes to real session dirs.
 
-Suites: smoke, clustering (densest-window ties, pre-boot outliers, dedupe, running-mark regression), titles/previews, plan + confidence rubric with a golden fixture, doctor contracts, tab order, verification, installer (offline archives, upgrade detection, collision refusal), and e2e dry-run / plan-roundtrip / skip-running.
+Suites: smoke, clustering (densest-window ties, pre-boot outliers, dedupe, running-mark regression), titles/previews, plan + confidence rubric with a golden fixture, doctor contracts, tab order, verification, installer (offline archives, upgrade detection, collision refusal), and e2e dry-run / plan-roundtrip / skip-running / installed-CLI (stdin-piped install into an isolated HOME, then doctor, discovery, plan roundtrip, and an upgrade driven through the real `pfr` launcher symlink on PATH).
 
 ## Layout
 

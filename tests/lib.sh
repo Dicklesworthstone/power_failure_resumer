@@ -11,10 +11,21 @@ FAKE_BOOT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['fak
 FIX_ARGS=(--codex-root "$FIX/codex" --claude-root "$FIX/claude"
           --fake-boot "$FAKE_BOOT" --lookback-hours 8760000)
 
-# Deterministic runs: no agent-mail tab unless a test opts in explicitly.
+# Deterministic runs: no agent-mail or status tab unless a test opts in.
 export PFR_AM=0
+export PFR_STATUS_TAB=0
 
 fail() { echo "ASSERT FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "${3:-}: expected '$2', got '$1'"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "${3:-}: missing '$2' in: $1"; }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "${3:-}: unexpected '$2' in: $1"; }
+
+# Tests keep their isolated state under ignored logs instead of deleting temp
+# trees. This follows the machine-wide no-delete contract and preserves failure
+# evidence for inspection.
+new_state_dir() {
+  local label="${1:-pfr-test}" path
+  path="$PFR_ROOT/tests/logs/state/${label}-$(date +%Y%m%d_%H%M%S)-$$-${RANDOM}"
+  mkdir -p "$path"
+  printf '%s\n' "$path"
+}

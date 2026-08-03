@@ -2,8 +2,7 @@
 # E2E: dry-run saves a plan → --last-plan dry-run reopens the SAME session set.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-SD="$(mktemp -d "${TMPDIR:-/tmp}/pfr-e2e.XXXXXX")"
-trap 'rm -rf "$SD"' EXIT
+SD="$(new_state_dir pfr-e2e-plan)"
 
 ids_of() { grep -oE '(cod resume|cc --resume) [0-9a-f-]+' <<<"$1" | awk '{print $NF}' | sort; }
 
@@ -28,10 +27,9 @@ out3="$("$PFR" --dry-run --last-plan --state-dir "$SD" \
 assert_eq "$(ids_of "$out3")" "$ids1" "forced stale plan still reopens same set"
 
 # --no-save-plan must not write
-SD2="$(mktemp -d "${TMPDIR:-/tmp}/pfr-e2e.XXXXXX")"
+SD2="$(new_state_dir pfr-e2e-nosave)"
 "$PFR" --dry-run "${FIX_ARGS[@]}" --state-dir "$SD2" --no-save-plan >/dev/null 2>&1 \
   || fail "--no-save-plan run failed"
 [[ ! -e "$SD2/last-plan.json" ]] || fail "--no-save-plan still wrote a plan"
-rm -rf "$SD2"
 
 echo "e2e_plan_roundtrip OK"

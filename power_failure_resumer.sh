@@ -117,9 +117,28 @@ EXAMPLES:
 EOF
 }
 
-log()  { printf '› %s\n' "$*" >&2; }
-warn() { printf '⚠ %s\n' "$*" >&2; }
-die()  { printf '✗ %s\n' "$*" >&2; exit 1; }
+# Every log line also lands in the run log (tab 1 tails it live during opens).
+log()  { printf '› %s\n' "$*" >&2; [[ -n "${RUN_LOG:-}" ]] && printf '› %s\n' "$*" >> "$RUN_LOG" || true; }
+warn() { printf '⚠ %s\n' "$*" >&2; [[ -n "${RUN_LOG:-}" ]] && printf '⚠ %s\n' "$*" >> "$RUN_LOG" || true; }
+die()  { printf '✗ %s\n' "$*" >&2; [[ -n "${RUN_LOG:-}" ]] && printf '✗ %s\n' "$*" >> "$RUN_LOG" || true; exit 1; }
+
+# Styled header for the run log (gum when present, ANSI/ASCII fallback).
+run_log_header() {
+  [[ -n "${RUN_LOG:-}" ]] || return 0
+  if command -v gum >/dev/null 2>&1; then
+    CLICOLOR_FORCE=1 gum style \
+      --border double --border-foreground 39 --padding "0 2" \
+      "$(CLICOLOR_FORCE=1 gum style --foreground 42 --bold 'power_failure_resumer — resume run')" \
+      "$(CLICOLOR_FORCE=1 gum style --foreground 245 "$(date '+%Y-%m-%d %H:%M:%S')  driver=${DRIVER} mode=${OPEN_MODE}")" \
+      >> "$RUN_LOG" 2>/dev/null && return 0
+  fi
+  {
+    printf '╔══════════════════════════════════════════╗\n'
+    printf '║  power_failure_resumer — resume run      ║\n'
+    printf '╚══════════════════════════════════════════╝\n'
+    printf '%s  driver=%s mode=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$DRIVER" "$OPEN_MODE"
+  } >> "$RUN_LOG"
+}
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
@@ -372,10 +391,16 @@ doctor_run() {
   local codex_dir claude_dir
   codex_dir="${CODEX_ROOT:-${CODEX_HOME:-$HOME/.codex}/sessions}"
   claude_dir="${CLAUDE_ROOT:-${CLAUDE_HOME:-$HOME/.claude}/projects}"
-  [[ -d "$codex_dir" ]] && add_check codex_root ok "$codex_dir" \
-    || add_check codex_root warn "$codex_dir missing (no codex sessions will be found)"
-  [[ -d "$claude_dir" ]] && add_check claude_root ok "$claude_dir" \
-    || add_check claude_root warn "$claude_dir missing (no claude sessions will be found)"
+  if [[ -d "$codex_dir" ]]; then
+    add_check codex_root ok "$codex_dir"
+  else
+    add_check codex_root warn "$codex_dir missing (no codex sessions will be found)"
+  fi
+  if [[ -d "$claude_dir" ]]; then
+    add_check claude_root ok "$claude_dir"
+  else
+    add_check claude_root warn "$claude_dir missing (no claude sessions will be found)"
+  fi
 
   command -v fzf >/dev/null 2>&1 \
     && add_check fzf ok "$(command -v fzf) (nicer --pick)" \
@@ -805,14 +830,35 @@ if (( ! DRY_RUN )) && [[ "$DRIVER" != "ghostty" ]]; then
   ensure_ghostty   # ghostty CLI driver spawns its own windows; no pre-launch needed
 fi
 
-# Agent-mail tab: when `am` is installed, open it FIRST so the mail hub is
-# tab 1. Disable with PFR_AM=0; PFR_AM_BIN overrides the binary (tests).
+# Tab 1 — live status: a Ghostty tab tailing this run's formatted log so the
+# whole resume is observable as it happens. Disable with PFR_STATUS_TAB=0.
+if [[ "${PFR_STATUS_TAB:-1}" != "0" ]]; then
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  RUN_LOG="${STATE_DIR}/last-run.log"
+  if : > "$RUN_LOG" 2>/dev/null; then
+    run_log_header
+    log "run log: ${RUN_LOG}"
+    status_cmd="$(printf 'tail -n +1 -f %q' "$RUN_LOG")"
+    if (( DRY_RUN )); then
+      open_one "$HOME" "$status_cmd"
+    else
+      log "opening status tab (live run log) first…"
+      open_one "$HOME" "$status_cmd" || warn "failed to open status tab"
+      sleep "$DELAY_SECONDS"
+    fi
+  else
+    RUN_LOG=""
+  fi
+fi
+
+# Tab 2 — agent-mail: when `am` is installed, open it before any resumes.
+# Disable with PFR_AM=0; PFR_AM_BIN overrides the binary (tests).
 AM_BIN="${PFR_AM_BIN:-am}"
 if [[ "${PFR_AM:-1}" != "0" && -n "$AM_BIN" ]] && command -v "$AM_BIN" >/dev/null 2>&1; then
   if (( DRY_RUN )); then
     open_one "$HOME" "$AM_BIN"
   else
-    log "opening agent-mail tab (${AM_BIN}) first…"
+    log "opening agent-mail tab (${AM_BIN})…"
     open_one "$HOME" "$AM_BIN" || warn "failed to open agent-mail tab"
     sleep "$DELAY_SECONDS"
   fi

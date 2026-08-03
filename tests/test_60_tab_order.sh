@@ -24,7 +24,7 @@ codex("019f0000-0000-7000-8000-00000000d001", boot - 40, "/data/projects")  # hu
 codex("019f0000-0000-7000-8000-00000000d002", boot - 20, "/tmp")            # normal, newer
 PY
 
-out="$(PFR_AM=1 PFR_AM_BIN=sh "$PFR" --dry-run \
+out="$(PFR_STATUS_TAB=1 PFR_AM=1 PFR_AM_BIN=sh "$PFR" --dry-run \
         --codex-root "$FR/codex" --claude-root "$FR/claude-none" \
         --fake-boot "$FAKE_BOOT" --lookback-hours 8760000 --state-dir "$SD" 2>&1)" \
   || fail "dry-run failed: $out"
@@ -33,10 +33,12 @@ plan_lines="$(grep -E '^  DRY  ' <<<"$out")"
 line1="$(sed -n '1p' <<<"$plan_lines")"
 line2="$(sed -n '2p' <<<"$plan_lines")"
 line3="$(sed -n '3p' <<<"$plan_lines")"
+line4="$(sed -n '4p' <<<"$plan_lines")"
 
-assert_contains "$line1" "&& sh" "agent-mail tab (PFR_AM_BIN=sh) comes first"
-assert_contains "$line2" "00000000d001" "hub session (/data/projects) second"
-assert_contains "$line3" "00000000d002" "normal session third"
+assert_contains "$line1" "tail -n +1 -f" "status (run-log) tab comes first"
+assert_contains "$line2" "&& sh" "agent-mail tab (PFR_AM_BIN=sh) second"
+assert_contains "$line3" "00000000d001" "hub session (/data/projects) third"
+assert_contains "$line4" "00000000d002" "normal session fourth"
 
 # With PFR_AM=0 no am line appears
 out="$(PFR_AM=0 "$PFR" --dry-run \

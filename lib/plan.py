@@ -84,6 +84,14 @@ def atomic_write_json(path: Path, obj: Dict, mode: int = 0o600) -> None:
         raise
 
 
+def archives_to_prune(paths, keep: int = ARCHIVE_KEEP) -> list[Path]:
+    """Select oldest archive paths; deletion remains an explicit caller action."""
+    ordered = sorted(Path(path) for path in paths)
+    if keep <= 0:
+        return ordered
+    return ordered[:-keep]
+
+
 def cmd_save(args: argparse.Namespace) -> int:
     try:
         discovery = json.load(sys.stdin)
@@ -94,28 +102,34 @@ def cmd_save(args: argparse.Namespace) -> int:
     created_at = datetime.now().astimezone().isoformat(timespec="microseconds")
     plan = confidence.build_plan(discovery, created_at=created_at)
 
-    state_dir = Path(args.state_dir) if args.state_dir else default_state_dir()
-    state_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(state_dir, 0o700)
+    if args.extra_only and not args.extra_path:
+        eprint("error: --extra-only requires --extra-path")
+        return 2
 
-    last = state_dir / "last-plan.json"
-    atomic_write_json(last, plan)
+    last: Optional[Path] = None
+    if not args.extra_only:
+        state_dir = Path(args.state_dir) if args.state_dir else default_state_dir()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(state_dir, 0o700)
 
-    archive_dir = state_dir / "plans"
-    stamp = created_at.replace(":", "-").replace("+", "p")
-    atomic_write_json(archive_dir / f"plan-{stamp}.json", plan)
-    archived = sorted(archive_dir.glob("plan-*.json"))
-    for old in archived[:-ARCHIVE_KEEP]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
+        last = state_dir / "last-plan.json"
+        atomic_write_json(last, plan)
+
+        archive_dir = state_dir / "plans"
+        stamp = created_at.replace(":", "-").replace("+", "p")
+        atomic_write_json(archive_dir / f"plan-{stamp}.json", plan)
+        for old in archives_to_prune(archive_dir.glob("plan-*.json")):
+            try:
+                old.unlink()
+            except OSError:
+                pass
 
     if args.extra_path:
         atomic_write_json(Path(args.extra_path), plan)
 
+    saved_path = Path(args.extra_path) if args.extra_only else last
     print(json.dumps({
-        "saved": str(last),
+        "saved": str(saved_path),
         "extra": args.extra_path or None,
         "confidence": plan["confidence"],
         "session_count": len(plan["sessions"]),
@@ -305,6 +319,11 @@ def main(argv=None) -> int:
     sp = sub.add_parser("save", help="build + persist plan from discovery JSON on stdin")
     sp.add_argument("--state-dir", default=None)
     sp.add_argument("--extra-path", default=None, help="also write plan to this path")
+    sp.add_argument(
+        "--extra-only",
+        action="store_true",
+        help="write only --extra-path; do not update last-plan or archives",
+    )
 
     lp = sub.add_parser("load", help="validate + re-emit a plan as discovery JSON")
     lp.add_argument("--path", required=True)

@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +19,7 @@ from confidence import HIGH, LOW, MEDIUM, score_confidence  # noqa: E402
 
 PLAN_PY = ROOT / "lib" / "plan.py"
 GOLDEN_DIR = ROOT / "tests" / "fixtures" / "plans"
+STATE_ROOT = ROOT / "tests" / "logs" / "state"
 
 BOOT = 1785700000.0
 
@@ -137,7 +139,28 @@ class PlanBuildTest(unittest.TestCase):
         self.assertEqual(plan["confidence"], HIGH)
 
 
+class PlanValidationTest(unittest.TestCase):
+    def test_valid_plan_has_no_structural_errors(self):
+        plan = confidence.build_plan(fake_discovery(), created_at="2026-08-01T10:05:00-04:00")
+        import plan as plan_module
+        self.assertEqual(plan_module.validate_plan(plan), [])
+
+    def test_tampered_session_and_missing_timestamp_are_rejected(self):
+        plan = confidence.build_plan(fake_discovery(), created_at="2026-08-01T10:05:00-04:00")
+        plan.pop("created_at")
+        plan["sessions"][0]["session_id"] += "; touch /tmp/pwned"
+        import plan as plan_module
+        errors = plan_module.validate_plan(plan)
+        self.assertTrue(any("created_at" in error for error in errors))
+        self.assertTrue(any("exact UUID" in error for error in errors))
+
+
 class PlanCliRoundtripTest(unittest.TestCase):
+    def new_state_dir(self, label):
+        path = STATE_ROOT / f"{label}-{uuid.uuid4().hex}"
+        path.mkdir(parents=True)
+        return path
+
     def run_plan(self, argv, stdin_text=None, env=None):
         import os
         full_env = dict(os.environ)
@@ -149,58 +172,83 @@ class PlanCliRoundtripTest(unittest.TestCase):
         )
 
     def test_save_then_load_roundtrip(self):
-        with tempfile.TemporaryDirectory() as td:
-            r = self.run_plan(["save", "--state-dir", td],
-                              stdin_text=json.dumps(fake_discovery()))
-            self.assertEqual(r.returncode, 0, r.stderr)
-            info = json.loads(r.stdout)
-            self.assertEqual(info["confidence"], HIGH)
-            self.assertEqual(info["session_count"], 2)
+        td = self.new_state_dir("roundtrip")
+        r = self.run_plan(["save", "--state-dir", str(td)],
+                          stdin_text=json.dumps(fake_discovery()))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        info = json.loads(r.stdout)
+        self.assertEqual(info["confidence"], HIGH)
+        self.assertEqual(info["session_count"], 2)
 
-            last = Path(td) / "last-plan.json"
-            self.assertTrue(last.exists())
-            self.assertEqual(last.stat().st_mode & 0o777, 0o600)
+        last = td / "last-plan.json"
+        self.assertTrue(last.exists())
+        self.assertEqual(last.stat().st_mode & 0o777, 0o600)
 
-            r = self.run_plan(["load", "--path", str(last), "--fake-boot", str(BOOT)])
-            self.assertEqual(r.returncode, 0, r.stderr)
-            out = json.loads(r.stdout)
-            self.assertEqual(out["session_count"], 2)
-            self.assertEqual(out["confidence"], HIGH)
-            self.assertEqual(
-                {s["session_id"] for s in out["sessions"]},
-                {s["session_id"] for s in fake_discovery()["sessions"]},
-            )
+        r = self.run_plan(["load", "--path", str(last), "--fake-boot", str(BOOT)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["session_count"], 2)
+        self.assertEqual(out["confidence"], HIGH)
+        self.assertEqual(
+            {s["session_id"] for s in out["sessions"]},
+            {s["session_id"] for s in fake_discovery()["sessions"]},
+        )
 
     def test_load_refuses_other_boot(self):
-        with tempfile.TemporaryDirectory() as td:
-            self.run_plan(["save", "--state-dir", td],
-                          stdin_text=json.dumps(fake_discovery()))
-            last = Path(td) / "last-plan.json"
-            r = self.run_plan(["load", "--path", str(last),
-                               "--fake-boot", str(BOOT + 9999)])
-            self.assertEqual(r.returncode, 3)
-            self.assertIn("rebooted since", r.stderr)
-            r = self.run_plan(["load", "--path", str(last), "--force",
-                               "--fake-boot", str(BOOT + 9999)])
-            self.assertEqual(r.returncode, 0, r.stderr)
+        td = self.new_state_dir("other-boot")
+        self.run_plan(["save", "--state-dir", str(td)],
+                      stdin_text=json.dumps(fake_discovery()))
+        last = td / "last-plan.json"
+        r = self.run_plan(["load", "--path", str(last),
+                           "--fake-boot", str(BOOT + 9999)])
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("rebooted since", r.stderr)
+        r = self.run_plan(["load", "--path", str(last), "--force",
+                           "--fake-boot", str(BOOT + 9999)])
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_load_rejects_wrong_schema(self):
-        with tempfile.TemporaryDirectory() as td:
-            bad = Path(td) / "bad.json"
-            bad.write_text(json.dumps({"schema_version": 99, "sessions": []}))
-            r = self.run_plan(["load", "--path", str(bad)])
-            self.assertEqual(r.returncode, 2)
-            self.assertIn("schema_version", r.stderr)
+        td = self.new_state_dir("wrong-schema")
+        bad = td / "bad.json"
+        bad.write_text(json.dumps({"schema_version": 99, "sessions": []}))
+        r = self.run_plan(["load", "--path", str(bad)])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("schema_version", r.stderr)
+
+    def test_load_reconstructs_resume_command(self):
+        td = self.new_state_dir("tampered-command")
+        path = td / "tampered.json"
+        plan = confidence.build_plan(
+            fake_discovery(),
+            created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        plan["sessions"][0]["resume_cmd"] = "touch /tmp/should-never-run"
+        path.write_text(json.dumps(plan), encoding="utf-8")
+        r = self.run_plan(["load", "--path", str(path), "--fake-boot", str(BOOT)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        loaded = json.loads(r.stdout)
+        self.assertEqual(
+            loaded["sessions"][0]["resume_cmd"],
+            "cod resume 019f0000-0000-7000-8000-00000000c001",
+        )
+
+    def test_extra_only_does_not_create_state_plan(self):
+        td = self.new_state_dir("extra-only")
+        state = td / "state"
+        extra = td / "explicit.json"
+        r = self.run_plan(
+            ["save", "--state-dir", str(state), "--extra-only", "--extra-path", str(extra)],
+            stdin_text=json.dumps(fake_discovery()),
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(extra.exists())
+        self.assertFalse(state.exists())
 
     def test_archive_pruned(self):
-        with tempfile.TemporaryDirectory() as td:
-            plans = Path(td) / "plans"
-            plans.mkdir()
-            for i in range(25):
-                (plans / f"plan-2026-01-01T00-00-{i:02d}.json").write_text("{}")
-            self.run_plan(["save", "--state-dir", td],
-                          stdin_text=json.dumps(fake_discovery()))
-            self.assertLessEqual(len(list(plans.glob("plan-*.json"))), 21)
+        import plan as plan_module
+        paths = [Path(f"plan-2026-01-01T00-00-{i:02d}.json") for i in range(25)]
+        selected = plan_module.archives_to_prune(paths, keep=20)
+        self.assertEqual(selected, sorted(paths)[:5])
 
 
 if __name__ == "__main__":

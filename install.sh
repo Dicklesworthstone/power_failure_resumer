@@ -92,18 +92,18 @@ use_gum() { [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; }
 
 info() {
   [[ "$QUIET" -eq 1 ]] && return 0
-  if use_gum; then gum style --foreground 39 "-> $*"; else echo -e "\033[0;34m->\033[0m $*"; fi
+  if use_gum; then gum style --foreground 39 -- "-> $*"; else echo -e "\033[0;34m->\033[0m $*"; fi
 }
 ok() {
   [[ "$QUIET" -eq 1 ]] && return 0
-  if use_gum; then gum style --foreground 42 "ok $*"; else echo -e "\033[0;32mok\033[0m $*"; fi
+  if use_gum; then gum style --foreground 42 -- "ok $*"; else echo -e "\033[0;32mok\033[0m $*"; fi
 }
 warn() {
   [[ "$QUIET" -eq 1 ]] && return 0
-  if use_gum; then gum style --foreground 214 "!! $*"; else echo -e "\033[1;33m!!\033[0m $*"; fi
+  if use_gum; then gum style --foreground 214 -- "!! $*"; else echo -e "\033[1;33m!!\033[0m $*"; fi
 }
 err() {
-  if use_gum; then gum style --foreground 196 "xx $*" >&2; else echo -e "\033[0;31mxx\033[0m $*" >&2; fi
+  if use_gum; then gum style --foreground 196 -- "xx $*" >&2; else echo -e "\033[0;31mxx\033[0m $*" >&2; fi
 }
 
 run_with_spinner() {

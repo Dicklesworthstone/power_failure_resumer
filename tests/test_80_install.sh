@@ -45,6 +45,22 @@ same_out="$(
 )" || fail "idempotent reinstall failed: $same_out"
 assert_contains "$same_out" "already up to date" "unchanged tree short-circuit"
 
+# Gum output path: every other test runs --no-gum or without a tty, which is
+# exactly how the "-> text parsed as a gum flag" regression shipped. When gum
+# and macOS script(1) are available, exercise the styled path on a real pty.
+if command -v gum >/dev/null 2>&1 && [[ "$(uname -s)" == "Darwin" ]]; then
+  GUM_HOME="$WORK/gum-home"
+  mkdir -p "$GUM_HOME"
+  HOME="$GUM_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
+  PFR_INSTALL_LOCK_DIR="$WORK/lock-gum" \
+  script -q "$WORK/gum-tty.log" \
+    bash "$PFR_ROOT/install.sh" --offline "$WORK/pfr-one.tar.gz" \
+      --prefix "$GUM_HOME/share/pfr" --bin-dir "$GUM_HOME/bin" >/dev/null 2>&1 \
+    || fail "gum-path pty install failed: $(tail -5 "$WORK/gum-tty.log")"
+  assert_not_contains "$(<"$WORK/gum-tty.log")" "unknown flag" "gum text terminated with --"
+  [[ -x "$GUM_HOME/share/pfr/power_failure_resumer.sh" ]] || fail "gum-path install incomplete"
+fi
+
 # Agent skill: never installed by default; --install-skill copies it into
 # detected agent dirs only; unrelated destination paths are refused.
 if [[ -f "$PREFIX/skills/pfr/SKILL.md" ]]; then

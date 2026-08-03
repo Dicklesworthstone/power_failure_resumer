@@ -103,6 +103,8 @@ Installs to `~/.local/share/pfr` and symlinks `pfr` into `~/.local/bin`. Flags (
 | `--verify` | Run `pfr --doctor` after install |
 | `--quiet` / `--no-gum` | Quieter or plain ANSI output |
 
+The installer treats itself as a security boundary. Archives are validated before extraction (single top-level directory; no traversal, links, devices, or oversized members; macOS AppleDouble litter tolerated). It refuses to replace an install root or `pfr` launcher it does not own, stages the complete new tree before activating it, and keeps the previous tree until the launcher update succeeds so a failed upgrade rolls back. An unchanged tree short-circuits with "already up to date" (bytecode caches are ignored when comparing) while still repairing a missing launcher.
+
 **From a checkout:**
 
 ```bash
@@ -158,8 +160,8 @@ From a checkout without installing: `./power_failure_resumer.sh …` and `./scri
 | `--last-plan` | Load that plan; skip rediscovery |
 | `--plan PATH` | Load a specific plan file |
 | `--save-plan PATH` | Also write a copy to PATH |
-| `--no-save-plan` | Do not write last-plan.json |
-| `--force-stale-plan` | Allow a plan from a different boot / older than 24h |
+| `--no-save-plan` | Do not write last-plan.json (with `--save-plan PATH`, only the explicit copy is written) |
+| `--force-stale-plan` | Allow a plan from a different boot, older than 24h, or timestamped in the future |
 
 ### Launch
 
@@ -276,7 +278,7 @@ They run in a real interactive shell, so `cod` / `cc` aliases and their flags ap
 | `<state-dir>/last-report.json` | Post-open verification summary |
 | `<state-dir>/run-*.log` | Per-run live logs (newest 10 kept) |
 
-Plan load refuses a different boot time or plans older than 24h unless `--force-stale-plan`, and rejects any `schema_version` other than 1.
+Plan load refuses a plan from a different boot, older than 24h, or timestamped more than five minutes in the future unless `--force-stale-plan`, and rejects any `schema_version` other than 1. Every session record is structurally validated (provider, exact UUID, absolute cwd, finite mtime) and the resume command is reconstructed from those validated fields; the stored `resume_cmd` text is never executed.
 
 ### Doctor
 

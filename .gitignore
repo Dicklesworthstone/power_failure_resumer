@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 tests/logs/
 .DS_Store
+
+# bv (beads viewer) local config and caches
+.bv/
+tests/fixtures/generated/

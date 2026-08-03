@@ -1,0 +1,4 @@
+{
+  "fake_boot": 1785700000,
+  "comment": "Epoch used as the simulated power-failure boot time. Fixture mtimes are set relative to this by make_fixtures.py; git cannot store mtimes, so generated/ is rebuilt on every test run."
+}

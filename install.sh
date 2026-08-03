@@ -245,8 +245,12 @@ take_lock() {
   if [[ "$old_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$old_pid" 2>/dev/null; then
     warn "removing stale install lock (pid $old_pid)"
     rm -rf "$LOCK_DIR"
-    mkdir "$LOCK_DIR" && echo "$$" > "$LOCK_DIR/pid"
-    return 0
+    # Re-acquire atomically; another installer may win this exact race, in
+    # which case the lock is NOT ours and we must not proceed.
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo "$$" > "$LOCK_DIR/pid"
+      return 0
+    fi
   fi
   err "another install is running (lock: $LOCK_DIR)"; exit 1
 }
@@ -295,7 +299,13 @@ with tarfile.open(archive, "r:gz") as tf:
             raise SystemExit("archive is unexpectedly large")
     if len(roots) != 1:
         raise SystemExit("archive must contain exactly one top-level directory")
-    tf.extractall(destination, members=members)
+    try:
+        # The "data" filter also strips setuid/setgid bits and rejects links
+        # at the tarfile layer, backing up the manual member checks above.
+        tf.extractall(destination, members=members, filter="data")
+    except TypeError:
+        # Python < 3.12: no extraction filters; manual checks still apply.
+        tf.extractall(destination, members=members)
     print(str(PurePosixPath(destination) / next(iter(roots))))
 PY
 )" || { err "archive validation or extraction failed"; exit 1; }
@@ -366,11 +376,22 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+
+
+def shipped(path: Path) -> bool:
+    # Hash shipped content only. Runtime bytecode caches (__pycache__/*.pyc)
+    # appear in the installed tree after first use and must not make an
+    # unchanged install look "updated"; same for macOS Finder/xattr litter.
+    if "__pycache__" in path.parts or path.suffix == ".pyc":
+        return False
+    return not (path.name.startswith("._") or path.name == ".DS_Store")
+
+
 paths = [root / "power_failure_resumer.sh"]
 for dirname in ("lib", "docs"):
     base = root / dirname
     if base.is_dir():
-        paths.extend(path for path in base.rglob("*") if path.is_file())
+        paths.extend(p for p in base.rglob("*") if p.is_file() and shipped(p))
 digest = hashlib.sha256()
 for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
     rel = path.relative_to(root).as_posix().encode()

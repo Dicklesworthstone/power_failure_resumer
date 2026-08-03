@@ -127,6 +127,17 @@ class InputBoundaryTest(unittest.TestCase):
             },
         )
 
+    def test_running_detection_survives_unbalanced_quotes(self):
+        # An apostrophe elsewhere in argv breaks shlex tokenization; the live
+        # resume on the same line must still be detected, or a second pfr run
+        # double-opens exactly the session this check exists to protect.
+        line = ("sh -c cd /tmp/it's-here && "
+                "/usr/local/bin/cod resume 66666666-6666-6666-6666-666666666666")
+        self.assertEqual(
+            discover.running_session_ids(line),
+            {"66666666-6666-6666-6666-666666666666"},
+        )
+
     def test_resume_id_must_be_exact_uuid(self):
         good = "11111111-1111-1111-1111-111111111111"
         self.assertEqual(discover.validated_uuid(good), good)

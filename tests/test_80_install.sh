@@ -70,6 +70,18 @@ changed_out="$(
 assert_contains "$changed_out" "updated" "library-only change detected"
 assert_contains "$(<"$PREFIX/lib/confidence.py")" "full-tree hash regression marker" "new library activated"
 
+# Runtime bytecode caches in a used install (lib/__pycache__/*.pyc) must not
+# defeat the up-to-date check by perturbing the tree hash.
+mkdir -p "$PREFIX/lib/__pycache__"
+printf 'bytecode junk\n' > "$PREFIX/lib/__pycache__/regression.cpython-999.pyc"
+pyc_out="$(
+  HOME="$TEST_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
+  PFR_INSTALL_LOCK_DIR="$WORK/lock-pyc" \
+  bash "$PFR_ROOT/install.sh" --offline "$WORK/pfr-two.tar.gz" \
+    --prefix "$PREFIX" --bin-dir "$BIN_TWO" --no-gum 2>&1
+)" || fail "pycache-noop install failed: $pyc_out"
+assert_contains "$pyc_out" "already up to date" "bytecode caches ignored by tree hash"
+
 # Existing unrelated launcher paths and unsafe archives must fail closed.
 COLLISION_HOME="$WORK/collision-home"
 mkdir -p "$COLLISION_HOME/bin"

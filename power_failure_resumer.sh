@@ -952,6 +952,7 @@ else
   log "done: ${OPEN_OKS} opened, ${OPEN_FAILS} failed (of ${SEL_COUNT})."
   VERIFY_RC=0
   if [[ "${PFR_VERIFY:-1}" != "0" ]]; then
+    require_number "PFR_VERIFY_TIMEOUT" "${PFR_VERIFY_TIMEOUT:-15}"
     log "verifying resumes (up to ${PFR_VERIFY_TIMEOUT:-15}s)…"
     verify_args=(--timeout "${PFR_VERIFY_TIMEOUT:-15}" --state-dir "$STATE_DIR"
                  --driver "$DRIVER" --open-mode "$OPEN_MODE")

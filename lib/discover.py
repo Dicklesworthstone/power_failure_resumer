@@ -107,7 +107,11 @@ def running_session_ids(ps_text: Optional[str] = None) -> set:
         try:
             tokens = shlex.split(line)
         except ValueError:
-            continue
+            # Unbalanced quotes (an apostrophe in a path or prompt fragment).
+            # Degrade to whitespace tokens rather than dropping the line:
+            # missing a live resume here causes exactly the double-open this
+            # check exists to prevent.
+            tokens = line.split()
 
         for index, token in enumerate(tokens):
             if Path(token).name.lower() in _AGENT_EXECUTABLES:

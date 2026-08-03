@@ -12,7 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
-from discover import extract_claude_identity, extract_codex_first_user  # noqa: E402
+from discover import (  # noqa: E402
+    extract_claude_identity,
+    extract_codex_first_user,
+    extract_codex_last_user,
+)
 
 WORK = ROOT / "tests" / "logs" / "state"
 
@@ -79,6 +83,25 @@ class ClaudeTitleTest(unittest.TestCase):
         self.assertEqual(title, "actual request here")
         self.assertEqual(preview, "actual request here")
 
+    def test_preview_prefers_last_real_user_message(self):
+        p = tmp_jsonl("last", [
+            user_line("first question remains the title fallback"),
+            user_line("last question shows where work stopped"),
+            user_line("<system-reminder>trailing noise</system-reminder>"),
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertEqual(title, "first question remains the title fallback")
+        self.assertEqual(preview, "last question shows where work stopped")
+
+    def test_preview_falls_back_to_first_message_outside_tail(self):
+        p = tmp_jsonl("tail-fallback", [
+            user_line("first question outside the bounded tail"),
+            *({"type": "progress", "padding": "x" * 1024} for _ in range(300)),
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertEqual(title, "first question outside the bounded tail")
+        self.assertEqual(preview, "first question outside the bounded tail")
+
     def test_content_block_list_and_truncation(self):
         long_text = "x" * 500
         p = tmp_jsonl("blocks", [
@@ -116,6 +139,31 @@ class CodexPreviewTest(unittest.TestCase):
                                               "message": "resume the run"}},
         ])
         self.assertEqual(extract_codex_first_user(p), "resume the run")
+
+    def test_last_user_message_is_preferred_over_first(self):
+        p = tmp_jsonl("last", [
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": "first request"}},
+            {"type": "event_msg", "payload": {
+                "type": "user_message", "message": "last request"}},
+            {"type": "event_msg", "payload": {
+                "type": "user_message",
+                "message": "<system-reminder>trailing noise</system-reminder>"}},
+        ])
+        self.assertEqual(extract_codex_last_user(p), "last request")
+
+    def test_last_user_message_falls_back_to_first_outside_tail(self):
+        p = tmp_jsonl("tail-fallback", [
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": "first request outside the bounded tail"}},
+            *({"type": "progress", "padding": "x" * 1024} for _ in range(300)),
+        ])
+        self.assertEqual(
+            extract_codex_last_user(p),
+            "first request outside the bounded tail",
+        )
 
 
 if __name__ == "__main__":

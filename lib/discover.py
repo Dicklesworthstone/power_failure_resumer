@@ -246,7 +246,8 @@ def extract_claude_identity(path: Path, max_lines: int = 200) -> Tuple[str, str]
     """Return (title, preview) for a Claude session file.
 
     Title priority (casr-verified): custom-title > ai-title > summary >
-    first real user message. Preview is always the first real user message.
+    first real user message. Preview is the last real user message in a
+    bounded transcript tail, falling back to the first real user message.
     """
     custom = ai = summary = first_user = ""
     try:
@@ -279,12 +280,13 @@ def extract_claude_identity(path: Path, max_lines: int = 200) -> Tuple[str, str]
     except OSError:
         pass
 
+    tail_lines = _tail_lines(path)
+
     # A custom/AI title can be appended after hundreds of transcript events.
     # Search a bounded tail whenever the highest-priority title was not found
-    # in the head. This is deliberately title-only: the preview remains the
-    # first user message, not a later message that happens to be in the tail.
+    # in the head. Title priority continues to use the first real user message.
     if not custom:
-        for line in _tail_lines(path):
+        for line in tail_lines:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -305,8 +307,43 @@ def extract_claude_identity(path: Path, max_lines: int = 200) -> Tuple[str, str]
                 value = obj.get("summary")
                 if isinstance(value, str):
                     summary = value
+
+    last_user = ""
+    for line in reversed(tail_lines):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "user":
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        text = _first_text_block(msg.get("content"))
+        if text.strip() and not _is_boilerplate(text):
+            last_user = text
+            break
+
     title = _clean_snippet(custom or ai or summary or first_user, 80)
-    return title, _clean_snippet(first_user)
+    return title, _clean_snippet(last_user or first_user)
+
+
+def _codex_user_text(obj: object) -> str:
+    """Return user text from one Codex transcript record, if present."""
+    if not isinstance(obj, dict):
+        return ""
+    payload = obj.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    if (obj.get("type") == "response_item"
+            and payload.get("type") == "message"
+            and payload.get("role") == "user"):
+        return _first_text_block(payload.get("content"))
+    if (obj.get("type") == "event_msg"
+            and payload.get("type") == "user_message"):
+        raw = payload.get("message")
+        return raw if isinstance(raw, str) else _first_text_block(raw)
+    return ""
 
 
 def extract_codex_first_user(path: Path, max_lines: int = 200) -> str:
@@ -320,25 +357,25 @@ def extract_codex_first_user(path: Path, max_lines: int = 200) -> str:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(obj, dict):
-                    continue
-                payload = obj.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                text = ""
-                if (obj.get("type") == "response_item"
-                        and payload.get("type") == "message"
-                        and payload.get("role") == "user"):
-                    text = _first_text_block(payload.get("content"))
-                elif (obj.get("type") == "event_msg"
-                        and payload.get("type") == "user_message"):
-                    raw = payload.get("message")
-                    text = raw if isinstance(raw, str) else _first_text_block(raw)
+                text = _codex_user_text(obj)
                 if text.strip() and not _is_boilerplate(text):
                     return _clean_snippet(text)
     except OSError:
         pass
     return ""
+
+
+def extract_codex_last_user(path: Path, max_lines: int = 200) -> str:
+    """Last real Codex user message from a bounded tail, else the first one."""
+    for line in reversed(_tail_lines(path)):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        text = _codex_user_text(obj)
+        if text.strip() and not _is_boilerplate(text):
+            return _clean_snippet(text)
+    return extract_codex_first_user(path, max_lines)
 
 
 def extract_uuid_from_name(name: str) -> Optional[str]:
@@ -412,7 +449,7 @@ def discover_codex(sessions_root: Path, since_mtime: float) -> List[Session]:
             title_bits.append(str(payload["agent_nickname"]))
         title_bits.append(Path(cwd).name or cwd)
         title = " · ".join(title_bits)
-        preview = extract_codex_first_user(path)
+        preview = extract_codex_last_user(path)
 
         out.append(
             Session(

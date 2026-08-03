@@ -180,22 +180,28 @@ preflight() {
   [[ "$PREFIX" != "/" && "$BIN_DIR" != "/" ]] || {
     err "refusing to install into the filesystem root"; exit 2;
   }
-  local avail_kb
-  avail_kb="$(df -Pk "${HOME}" 2>/dev/null | awk 'NR==2 {print $4}')"
-  if [[ -n "$avail_kb" && "$avail_kb" -lt 10240 ]]; then
-    err "less than 10MB free in \$HOME"; exit 1
-  fi
-  mkdir -p "$(dirname "$PREFIX")" "$BIN_DIR" 2>/dev/null || {
+  local install_parent avail_kb
+  install_parent="$(dirname "$PREFIX")"
+  mkdir -p "$install_parent" "$BIN_DIR" 2>/dev/null || {
     err "cannot create install parent / $BIN_DIR"; exit 1;
   }
-  [[ -w "$(dirname "$PREFIX")" && -w "$BIN_DIR" ]] || {
+  avail_kb="$(df -Pk "$install_parent" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [[ -n "$avail_kb" && "$avail_kb" -lt 10240 ]]; then
+    err "less than 10MB free on the install volume"; exit 1
+  fi
+  [[ -w "$install_parent" && -w "$BIN_DIR" ]] || {
     err "install parent or $BIN_DIR is not writable"; exit 1;
   }
   if [[ -e "$PREFIX" || -L "$PREFIX" ]]; then
     [[ -d "$PREFIX" && ! -L "$PREFIX" ]] || {
       err "install root exists but is not a real directory: $PREFIX"; exit 1;
     }
-    if [[ ! -f "$PREFIX/.pfr-install" ]]; then
+    if [[ -f "$PREFIX/.pfr-install" ]]; then
+      if [[ "$(<"$PREFIX/.pfr-install")" != "$REPO_OWNER/$REPO_NAME" ]]; then
+        err "refusing install root with an unrecognized ownership marker: $PREFIX"
+        exit 1
+      fi
+    else
       if [[ ! -f "$PREFIX/power_failure_resumer.sh" || ! -f "$PREFIX/lib/discover.py" ]]; then
         err "refusing to replace an unrelated directory: $PREFIX"
         exit 1
@@ -236,7 +242,7 @@ take_lock() {
   fi
   local old_pid
   old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  if [[ -n "$old_pid" ]] && ! kill -0 "$old_pid" 2>/dev/null; then
+  if [[ "$old_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$old_pid" 2>/dev/null; then
     warn "removing stale install lock (pid $old_pid)"
     rm -rf "$LOCK_DIR"
     mkdir "$LOCK_DIR" && echo "$$" > "$LOCK_DIR/pid"
@@ -301,7 +307,7 @@ PY
 }
 
 ensure_launcher() {
-  local link_path="$BIN_DIR/pfr" link_tmp="$BIN_DIR/.pfr-link.$$"
+  local link_path="$BIN_DIR/pfr"
   if [[ -L "$link_path" && "$(readlink "$link_path" 2>/dev/null || true)" == "$PREFIX/power_failure_resumer.sh" ]]; then
     return 0
   fi
@@ -311,8 +317,9 @@ ensure_launcher() {
     err "refusing to replace unrelated path: $link_path"
     return 1
   fi
-  ln -s "$PREFIX/power_failure_resumer.sh" "$link_tmp" || return 1
-  mv "$link_tmp" "$link_path"
+  # symlink(2) creates the directory entry atomically and fails if another
+  # process won the race. A temp-link + mv would overwrite that new entry.
+  ln -s "$PREFIX/power_failure_resumer.sh" "$link_path"
 }
 
 install_tree() {
@@ -451,7 +458,10 @@ main() {
 
   if [[ "$VERIFY" -eq 1 ]]; then
     info "running post-install doctor"
-    "$BIN_DIR/pfr" --doctor || warn "doctor reported problems — see above"
+    if ! "$BIN_DIR/pfr" --doctor; then
+      err "post-install doctor failed"
+      exit 1
+    fi
   fi
   summary
 }

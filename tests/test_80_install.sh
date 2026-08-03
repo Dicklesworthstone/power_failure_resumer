@@ -83,6 +83,18 @@ if HOME="$COLLISION_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
 fi
 assert_eq "$(<"$COLLISION_HOME/bin/pfr")" "owned by somebody else" "collision preserved"
 
+MARKER_HOME="$WORK/marker-home"
+mkdir -p "$MARKER_HOME/share/pfr" "$MARKER_HOME/bin"
+printf 'another/project\n' > "$MARKER_HOME/share/pfr/.pfr-install"
+if HOME="$MARKER_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
+   PFR_INSTALL_LOCK_DIR="$WORK/lock-marker" \
+   bash "$PFR_ROOT/install.sh" --offline "$WORK/pfr-one.tar.gz" \
+     --prefix "$MARKER_HOME/share/pfr" --bin-dir "$MARKER_HOME/bin" \
+     --no-gum >"$WORK/marker.log" 2>&1; then
+  fail "installer trusted an unrelated ownership marker"
+fi
+assert_contains "$(<"$WORK/marker.log")" "unrecognized ownership marker" "marker identity"
+
 python3 - "$WORK/unsafe.tar.gz" <<'PY'
 import io
 import tarfile
@@ -102,5 +114,23 @@ if HOME="$TEST_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
   fail "unsafe archive member was accepted"
 fi
 assert_contains "$(<"$WORK/unsafe.log")" "archive validation or extraction failed" "unsafe archive rejection"
+
+VERIFY_ROOT="$WORK/verify-archive"
+VERIFY_PACKAGE="$VERIFY_ROOT/pfr-source"
+VERIFY_HOME="$WORK/verify-home"
+mkdir -p "$VERIFY_PACKAGE" "$VERIFY_HOME/bin"
+cp -R "$PFR_ROOT/lib" "$VERIFY_PACKAGE/"
+cp -R "$PFR_ROOT/docs" "$VERIFY_PACKAGE/"
+printf '%s\n' '#!/usr/bin/env bash' '[[ "${1:-}" == "--doctor" ]] && exit 7' \
+  'exit 0' > "$VERIFY_PACKAGE/power_failure_resumer.sh"
+tar -czf "$WORK/verify.tar.gz" -C "$VERIFY_ROOT" pfr-source
+if HOME="$VERIFY_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
+   PFR_INSTALL_LOCK_DIR="$WORK/lock-verify" \
+   bash "$PFR_ROOT/install.sh" --offline "$WORK/verify.tar.gz" \
+     --prefix "$VERIFY_HOME/share/pfr" --bin-dir "$VERIFY_HOME/bin" \
+     --verify --no-gum >"$WORK/verify.log" 2>&1; then
+  fail "--verify succeeded after doctor failure"
+fi
+assert_contains "$(<"$WORK/verify.log")" "post-install doctor failed" "strict verification"
 
 echo "installer OK"

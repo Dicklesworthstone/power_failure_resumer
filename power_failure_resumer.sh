@@ -678,9 +678,14 @@ if count and (confidence == "high" or (confidence == "medium" and count >= 3)):
       fi
       if PLAN_INFO="$(printf '%s' "$JSON" | python3 "$PLAN_PY" "${plan_save_args[@]}" 2>/dev/null)"; then
         PLAN_SAVED_TO="$(printf '%s' "$PLAN_INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["saved"])' 2>/dev/null || true)"
+        if (( NOTIFY )) && [[ -z "$PLAN_SAVED_TO" ]]; then
+          warn "could not confirm qualifying plan was saved; notification not sent"
+          exit 1
+        fi
       else
         if (( NOTIFY )); then
-          exit 0
+          warn "could not save qualifying plan; notification not sent"
+          exit 1
         fi
         warn "could not save plan (continuing)"
         PLAN_SAVED_TO=""
@@ -697,15 +702,14 @@ send_notification() {
   notification_body="${session_count} session(s) ready — run: pfr --last-plan --pick"
 
   if [[ -n "${PFR_NOTIFY_CMD:-}" ]]; then
-    "$PFR_NOTIFY_CMD" "pfr" "$notification_body" >/dev/null 2>&1 || true
+    run_bounded 5 "$PFR_NOTIFY_CMD" "pfr" "$notification_body" >/dev/null 2>&1 || true
   elif [[ "$PLATFORM" == "Darwin" ]]; then
-    osascript - "$notification_body" >/dev/null 2>&1 <<'APPLESCRIPT' || true
-on run argv
+    run_bounded 5 osascript -e \
+      'on run argv
   display notification (item 1 of argv) with title "pfr"
-end run
-APPLESCRIPT
+end run' -- "$notification_body" >/dev/null 2>&1 || true
   elif command -v notify-send >/dev/null 2>&1; then
-    notify-send "pfr" "$notification_body" >/dev/null 2>&1 || true
+    run_bounded 5 notify-send "pfr" "$notification_body" >/dev/null 2>&1 || true
   fi
 }
 

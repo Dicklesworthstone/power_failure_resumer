@@ -64,4 +64,16 @@ assert_eq "$out" "" "notify ignores launch-only configuration"
 assert_eq "$(wc -l < "$NOTIFY_LOG" | tr -d '[:space:]')" "8" \
   "notify sent once without opening status or agent-mail tabs"
 
+# A notification must never point at a stale/missing last plan when persistence
+# fails. A regular file cannot serve as the requested state directory.
+BAD_STATE="$SD/not-a-directory"
+: > "$BAD_STATE"
+if out="$(run_notify --state-dir "$BAD_STATE")"; then
+  fail "notify must fail when the qualifying plan cannot be saved"
+fi
+assert_contains "$out" "could not save qualifying plan" \
+  "plan-save failure must be actionable"
+assert_eq "$(wc -l < "$NOTIFY_LOG" | tr -d '[:space:]')" "8" \
+  "failed plan persistence must not notify"
+
 echo "notify OK"

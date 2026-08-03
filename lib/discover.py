@@ -211,6 +211,23 @@ def _clean_snippet(text: str, limit: int = 160) -> str:
     return text
 
 
+def _head_lines(
+    path: Path, max_lines: int, max_bytes: int = 256 * 1024
+) -> List[str]:
+    """Return at most ``max_lines`` from a bounded file prefix.
+
+    Transcript records are untrusted and a single JSONL record can be very
+    large. Reading a fixed byte prefix keeps preview extraction bounded even
+    when the first record has no newline within the normal head scan.
+    """
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(max_bytes)
+    except OSError:
+        return []
+    return data.decode("utf-8", errors="replace").splitlines()[:max_lines]
+
+
 def _tail_lines(path: Path, max_bytes: int = 256 * 1024) -> List[str]:
     """Return complete lines from a bounded tail of ``path``.
 
@@ -250,35 +267,29 @@ def extract_claude_identity(path: Path, max_lines: int = 200) -> Tuple[str, str]
     bounded transcript tail, falling back to the first real user message.
     """
     custom = ai = summary = first_user = ""
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                if i >= max_lines:
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                typ = obj.get("type")
-                if typ == "custom-title" and not custom:
-                    value = obj.get("customTitle") or obj.get("title")
-                    custom = value if isinstance(value, str) else ""
-                elif typ == "ai-title" and not ai:
-                    value = obj.get("aiTitle")
-                    ai = value if isinstance(value, str) else ""
-                elif typ == "summary" and not summary:
-                    value = obj.get("summary")
-                    summary = value if isinstance(value, str) else ""
-                elif typ == "user" and not first_user:
-                    msg = obj.get("message")
-                    if isinstance(msg, dict) and msg.get("role") == "user":
-                        text = _first_text_block(msg.get("content"))
-                        if text.strip() and not _is_boilerplate(text):
-                            first_user = text
-    except OSError:
-        pass
+    for line in _head_lines(path, max_lines):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        typ = obj.get("type")
+        if typ == "custom-title" and not custom:
+            value = obj.get("customTitle") or obj.get("title")
+            custom = value if isinstance(value, str) else ""
+        elif typ == "ai-title" and not ai:
+            value = obj.get("aiTitle")
+            ai = value if isinstance(value, str) else ""
+        elif typ == "summary" and not summary:
+            value = obj.get("summary")
+            summary = value if isinstance(value, str) else ""
+        elif typ == "user" and not first_user:
+            msg = obj.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                text = _first_text_block(msg.get("content"))
+                if text.strip() and not _is_boilerplate(text):
+                    first_user = text
 
     tail_lines = _tail_lines(path)
 
@@ -348,20 +359,14 @@ def _codex_user_text(obj: object) -> str:
 
 def extract_codex_first_user(path: Path, max_lines: int = 200) -> str:
     """First real user message text from a codex rollout (skips AGENTS.md etc.)."""
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                if i >= max_lines:
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                text = _codex_user_text(obj)
-                if text.strip() and not _is_boilerplate(text):
-                    return _clean_snippet(text)
-    except OSError:
-        pass
+    for line in _head_lines(path, max_lines):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        text = _codex_user_text(obj)
+        if text.strip() and not _is_boilerplate(text):
+            return _clean_snippet(text)
     return ""
 
 

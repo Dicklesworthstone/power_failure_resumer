@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 from discover import (  # noqa: E402
+    _head_lines,
     extract_claude_identity,
     extract_codex_first_user,
     extract_codex_last_user,
@@ -120,6 +121,13 @@ class ClaudeTitleTest(unittest.TestCase):
 
 
 class CodexPreviewTest(unittest.TestCase):
+    def test_head_scan_is_bounded_when_first_record_is_huge(self):
+        p = tmp_jsonl("huge-head", [])
+        p.write_bytes(b"x" * (300 * 1024))
+        lines = _head_lines(p, 200)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(lines[0]), 256 * 1024)
+
     def test_skips_agents_md_and_finds_real_message(self):
         p = tmp_jsonl("codex", [
             {"type": "session_meta", "payload": {"id": "x"}},

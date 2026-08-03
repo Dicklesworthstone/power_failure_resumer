@@ -1,4 +1,5 @@
 # Shared helpers for pfr shell tests. Source from tests/test_*.sh.
+# shellcheck disable=SC2034  # shared variables are consumed by sourcing suites
 set -uo pipefail
 
 PFR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

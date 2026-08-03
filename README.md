@@ -105,7 +105,8 @@ Installs to `~/.local/share/pfr` and symlinks `pfr` into `~/.local/bin`. Flags (
 | `--offline TARBALL` | Install from a local tarball |
 | `--force` | Reinstall even if unchanged |
 | `--verify` | Run `pfr --doctor` after install |
-| `--install-skill` | Also install the bundled `pfr` agent skill into `~/.claude/skills` / `~/.codex/skills` (default: no) |
+| `--install-skill` | Install the bundled `pfr` agent skill without prompting |
+| `--no-install-skill` | Never install or ask about the agent skill |
 | `--quiet` / `--no-gum` | Quieter or plain ANSI output |
 
 The installer treats itself as a security boundary. Archives are validated before extraction (single top-level directory; no traversal, links, devices, or oversized members; macOS AppleDouble litter tolerated). It refuses to replace an install root or `pfr` launcher it does not own, stages the complete new tree before activating it, and keeps the previous tree until the launcher update succeeds so a failed upgrade rolls back. An unchanged tree short-circuits with "already up to date" (bytecode caches are ignored when comparing) while still repairing a missing launcher.
@@ -301,7 +302,7 @@ Plan load refuses a plan from a different boot, older than 24h, or timestamped m
 
 ## Agent skill
 
-The repository bundles an agent skill at [`skills/pfr/`](skills/pfr/) that teaches Claude Code and Codex the safe recovery loop: doctor first, dry-run and review the cluster, open the frozen plan with `--pick`, then treat any unverified entry in `last-report.json` as a failed recovery. It is not installed by default. Opt in at install time with `--install-skill` (copied into `~/.claude/skills/pfr` and `~/.codex/skills/pfr` for agents that exist on the machine), or install it by hand:
+The repository bundles an agent skill at [`skills/pfr/`](skills/pfr/) that teaches Claude Code and Codex the safe recovery loop: doctor first, dry-run and review the cluster, open the frozen plan with `--pick`, then treat any unverified entry in `last-report.json` as a failed recovery. Interactive installs ask whether to install it (default: no); `--install-skill` says yes without asking, `--no-install-skill` suppresses the question. Opt in any time with `--install-skill` (copied into `~/.claude/skills/pfr` and `~/.codex/skills/pfr` for agents that exist on the machine), or install it by hand:
 
 ```bash
 cp -R skills/pfr ~/.claude/skills/pfr

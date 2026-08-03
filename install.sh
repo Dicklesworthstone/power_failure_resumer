@@ -51,8 +51,10 @@ Options:
   --quiet            Print errors only
   --no-gum           Use plain ANSI output even if gum is installed
   --verify           Run pfr --doctor after installation
-  --install-skill    Also install the pfr agent skill into ~/.claude/skills
-                     and ~/.codex/skills for detected agents (default: no)
+  --install-skill    Install the pfr agent skill without prompting (goes into
+                     ~/.claude/skills and ~/.codex/skills where those exist);
+                     without this flag, interactive terminals are asked [y/N]
+  --no-install-skill Never install or ask about the agent skill
   -h, --help         Show this help
 EOF
 }
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --no-gum) NO_GUM=1; shift ;;
     --verify) VERIFY=1; shift ;;
     --install-skill) INSTALL_SKILL=1; shift ;;
+    --no-install-skill) INSTALL_SKILL=-1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -417,6 +420,31 @@ installed_version() {
   tree_version "$PREFIX"
 }
 
+# Decide whether to install the agent skill: --install-skill forces yes,
+# --no-install-skill forces no, and otherwise an interactive terminal is
+# asked with a default of No. curl|bash consumes stdin (it carries the
+# script), so the question must go through /dev/tty; without a usable tty
+# the answer is silently No.
+maybe_install_skill() {
+  case "$INSTALL_SKILL" in
+    1)  install_agent_skill; return 0 ;;
+    -1) return 0 ;;
+  esac
+  [[ "$QUIET" -eq 1 ]] && return 0
+  [[ -f "$PREFIX/skills/pfr/SKILL.md" ]] || return 0
+  [[ -t 0 || -t 1 || -t 2 ]] || return 0
+  [[ -r /dev/tty && -w /dev/tty ]] || return 0
+  local reply=""
+  printf 'Install the pfr agent skill for Claude Code / Codex (~/.claude/skills, ~/.codex/skills)? [y/N] ' > /dev/tty
+  if ! read -r reply < /dev/tty; then
+    reply=""
+  fi
+  case "$reply" in
+    y|Y|yes|YES) install_agent_skill ;;
+    *) info "skill not installed (re-run with --install-skill anytime)" ;;
+  esac
+}
+
 # Opt-in only (--install-skill): copy the bundled pfr agent skill into each
 # detected agent's skills directory. Never touches agents that are not present
 # and never replaces a directory that is not a pfr skill.
@@ -503,9 +531,7 @@ main() {
       ensure_launcher || { err "failed to install launcher"; exit 1; }
       ok "already up to date (content $before) — use --force to reinstall"
       maybe_add_path
-      if [[ "$INSTALL_SKILL" -eq 1 ]]; then
-        install_agent_skill
-      fi
+      maybe_install_skill
       summary
       return 0
     fi
@@ -523,9 +549,7 @@ main() {
       exit 1
     fi
   fi
-  if [[ "$INSTALL_SKILL" -eq 1 ]]; then
-    install_agent_skill
-  fi
+  maybe_install_skill
   summary
 }
 

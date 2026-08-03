@@ -3,7 +3,13 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 bash -n "$PFR" || fail "bash -n power_failure_resumer.sh"
-python3 -m py_compile "$DISCOVER" || fail "py_compile discover.py"
+python3 - "$DISCOVER" <<'PY' || fail "compile discover.py"
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+compile(path.read_text(encoding="utf-8"), str(path), "exec")
+PY
 
 out="$("$PFR" --help)" || fail "--help exit code"
 assert_contains "$out" "USAGE" "--help output"

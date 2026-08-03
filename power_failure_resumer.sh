@@ -29,6 +29,11 @@ CODEX_ROOT="${PFR_CODEX_ROOT:-}"        # override discover.py --codex-root (tes
 CLAUDE_ROOT="${PFR_CLAUDE_ROOT:-}"      # override discover.py --claude-root (tests)
 FAKE_BOOT="${PFR_FAKE_BOOT:-}"          # override boot epoch (tests)
 STATE_DIR="${PFR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pfr}"
+PLAN_PATH=""                            # --plan / --last-plan: open from a saved plan
+SAVE_PLAN_PATH=""                       # --save-plan: extra explicit plan copy
+NO_SAVE_PLAN=0
+FORCE_STALE_PLAN=0
+PLAN_SAVED_TO=""
 PROJECTS_ONLY=0
 INCLUDE_SUBAGENTS=0
 FORCE_REOPEN=0
@@ -68,6 +73,14 @@ ISOLATION (tests / non-standard setups):
   --claude-root PATH    Claude projects dir (default: \$CLAUDE_HOME/projects)
   --fake-boot EPOCH     Pretend the system booted at this epoch time
   --state-dir PATH      Where plans/reports are written (default: ~/.local/state/pfr)
+
+PLANS (discover once, open later):
+  Every discovery saves <state-dir>/last-plan.json (unless --no-save-plan).
+  --plan PATH           Open/list from a saved plan; skip rediscovery
+  --last-plan           Shorthand for --plan <state-dir>/last-plan.json
+  --save-plan PATH      Also write the plan to an explicit path
+  --no-save-plan        Do not write last-plan.json for this run
+  --force-stale-plan    Use a plan even if the machine rebooted since / plan >24h old
 
 LAUNCH:
   --dry-run, -n         List only; do not open Ghostty
@@ -232,6 +245,11 @@ while [[ $# -gt 0 ]]; do
     --claude-root) need_arg "$@"; CLAUDE_ROOT="$2"; shift 2 ;;
     --fake-boot) need_arg "$@"; FAKE_BOOT="$2"; shift 2 ;;
     --state-dir) need_arg "$@"; STATE_DIR="$2"; shift 2 ;;
+    --plan) need_arg "$@"; PLAN_PATH="$2"; shift 2 ;;
+    --last-plan) PLAN_PATH="__LAST__"; shift ;;
+    --save-plan) need_arg "$@"; SAVE_PLAN_PATH="$2"; shift 2 ;;
+    --no-save-plan) NO_SAVE_PLAN=1; shift ;;
+    --force-stale-plan) FORCE_STALE_PLAN=1; shift ;;
     --limit) need_arg "$@"; LIMIT="$2"; shift 2 ;;
     --json) JSON_OUT=1; shift ;;
     -n|--dry-run) DRY_RUN=1; shift ;;
@@ -342,16 +360,43 @@ if [[ -z "${PROVIDERS//[ ,]}" ]]; then
   die "--providers is empty"
 fi
 
-log "scanning sessions (providers=${PROVIDERS}, mode=${MODE}, window=${WINDOW_SECONDS}s)…"
-# discover.py: JSON on stdout, diagnostics on stderr — keep them separate.
-DISCOVER_ERR="$(tmpfile)"
-if ! JSON="$(python3 "$DISCOVER_PY" "${discover_args[@]}" 2>"$DISCOVER_ERR")"; then
+PLAN_PY="${ROOT}/lib/plan.py"
+[[ "$PLAN_PATH" == "__LAST__" ]] && PLAN_PATH="${STATE_DIR}/last-plan.json"
+
+if [[ -n "$PLAN_PATH" ]]; then
+  log "loading plan: ${PLAN_PATH}"
+  plan_load_args=(load --path "$PLAN_PATH")
+  (( FORCE_STALE_PLAN )) && plan_load_args+=(--force)
+  [[ -n "$FAKE_BOOT" ]] && plan_load_args+=(--fake-boot "$FAKE_BOOT")
+  if ! JSON="$(python3 "$PLAN_PY" "${plan_load_args[@]}")"; then
+    die "plan load failed (see message above)"
+  fi
+else
+  log "scanning sessions (providers=${PROVIDERS}, mode=${MODE}, window=${WINDOW_SECONDS}s)…"
+  # discover.py: JSON on stdout, diagnostics on stderr — keep them separate.
+  DISCOVER_ERR="$(tmpfile)"
+  if ! JSON="$(python3 "$DISCOVER_PY" "${discover_args[@]}" 2>"$DISCOVER_ERR")"; then
+    [[ -s "$DISCOVER_ERR" ]] && cat "$DISCOVER_ERR" >&2
+    rm -f "$DISCOVER_ERR"
+    die "discovery failed"
+  fi
   [[ -s "$DISCOVER_ERR" ]] && cat "$DISCOVER_ERR" >&2
   rm -f "$DISCOVER_ERR"
-  die "discovery failed"
+
+  # Persist the plan (discover once, open later) unless opted out.
+  if (( ! NO_SAVE_PLAN )) || [[ -n "$SAVE_PLAN_PATH" ]]; then
+    plan_save_args=(save --state-dir "$STATE_DIR")
+    [[ -n "$SAVE_PLAN_PATH" ]] && plan_save_args+=(--extra-path "$SAVE_PLAN_PATH")
+    if PLAN_INFO="$(printf '%s' "$JSON" | python3 "$PLAN_PY" "${plan_save_args[@]}")"; then
+      PLAN_SAVED_TO="$(printf '%s' "$PLAN_INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["saved"])' 2>/dev/null || true)"
+    else
+      warn "could not save plan (continuing)"
+      PLAN_SAVED_TO=""
+    fi
+  else
+    PLAN_SAVED_TO=""
+  fi
 fi
-[[ -s "$DISCOVER_ERR" ]] && cat "$DISCOVER_ERR" >&2
-rm -f "$DISCOVER_ERR"
 
 if (( JSON_OUT )); then
   printf '%s\n' "$JSON"
@@ -411,6 +456,8 @@ print(data.get("anchor_mtime_human") or "")
 print(len(lines))
 print(data.get("total_candidates_scanned") or 0)
 print(data.get("skipped_running") or 0)
+print(data.get("confidence") or "unknown")
+print(", ".join(data.get("confidence_reasons") or []))
 PY
 )"
 
@@ -420,12 +467,18 @@ ANCHOR="$(printf '%s\n' "$META" | sed -n '3p')"
 COUNT="$(printf '%s\n' "$META" | sed -n '4p')"
 SCANNED="$(printf '%s\n' "$META" | sed -n '5p')"
 SKIPPED_RUNNING="$(printf '%s\n' "$META" | sed -n '6p')"
+CONFIDENCE="$(printf '%s\n' "$META" | sed -n '7p')"
+CONF_REASONS="$(printf '%s\n' "$META" | sed -n '8p')"
 
 echo
 log "boot time:     ${BOOT}"
 log "cluster mode:  ${MODE_USED}"
 log "anchor mtime:  ${ANCHOR}"
 log "matched:       ${COUNT} session(s)  (from ${SCANNED} recent candidates)"
+log "confidence:    ${CONFIDENCE}  (${CONF_REASONS})"
+if [[ "$CONFIDENCE" == "low" ]]; then
+  warn "LOW confidence this is a real power-failure cluster — review before opening."
+fi
 if [[ "${SKIPPED_RUNNING:-0}" != "0" ]]; then
   log "skipped:       ${SKIPPED_RUNNING} already-running session(s)  (--force-reopen to include)"
 fi
@@ -592,6 +645,10 @@ done < "$SELECTED_FILE"
 echo
 if (( DRY_RUN )); then
   log "dry-run complete — re-run with -y (or answer y) to open."
+  if [[ -n "$PLAN_SAVED_TO" ]]; then
+    log "plan saved: ${PLAN_SAVED_TO}  (confidence=${CONFIDENCE}, ${SEL_COUNT} sessions)"
+    log "next: pfr --last-plan -y   or   pfr --last-plan --pick"
+  fi
 else
   log "done: ${OPEN_OKS} opened, ${OPEN_FAILS} failed (of ${SEL_COUNT})."
   if (( OPEN_FAILS > 0 )); then

@@ -51,6 +51,8 @@ on run argv
 	set createdSurface to false
 	set nativeErrText to ""
 	set termObj to missing value
+	set newTab to missing value
+	set newWindow to missing value
 
 	-- ---------- Preferred: Ghostty scripting (no keystrokes) ----------
 	try
@@ -65,25 +67,43 @@ on run argv
 			end try
 
 			if openMode is "window" then
-				set w to new window with configuration cfg
+				set newWindow to new window with configuration cfg
+				set createdSurface to true
 				delay settleSecs
-				set termObj to focused terminal of selected tab of w
+				try
+					set termObj to focused terminal of selected tab of newWindow
+				on error
+					delay 0.25
+					set termObj to focused terminal of selected tab of newWindow
+				end try
 			else
 				try
 					set win to front window
-					set t to new tab in win with configuration cfg
-					delay settleSecs
-					set termObj to focused terminal of t
+					set newTab to new tab in win with configuration cfg
+					set createdSurface to true
 				on error
-					set w to new window with configuration cfg
-					delay settleSecs
-					set termObj to focused terminal of selected tab of w
+					set newWindow to new window with configuration cfg
+					set createdSurface to true
+				end try
+				delay settleSecs
+				try
+					if newTab is not missing value then
+						set termObj to focused terminal of newTab
+					else
+						set termObj to focused terminal of selected tab of newWindow
+					end if
+				on error
+					delay 0.25
+					if newTab is not missing value then
+						set termObj to focused terminal of newTab
+					else
+						set termObj to focused terminal of selected tab of newWindow
+					end if
 				end try
 			end if
 		end tell
 
 		if termObj is missing value then error "no terminal surface"
-		set createdSurface to true
 
 		tell application "Ghostty"
 			-- Retry once: first attempt can race shell rc on a brand-new surface.
@@ -106,44 +126,51 @@ on run argv
 
 	set oldClip to missing value
 	try
-		set oldClip to the clipboard as text
+		-- Preserve the native value. Coercing to text destroys image, file, and
+		-- rich clipboard contents when the fallback path runs.
+		set oldClip to the clipboard
+	on error clipErr
+		error "cannot preserve clipboard for UI fallback: " & (clipErr as text)
 	end try
 	set the clipboard to lineToType
 
-	tell application "System Events"
-		if not (exists process "Ghostty") then
-			error "Ghostty process not found for UI automation (native also failed: " & nativeErrText & ")"
-		end if
-		tell process "Ghostty"
-			set frontmost to true
-			delay 0.1
-
-			if createdSurface is false then
-				if openMode is "window" then
-					keystroke "n" using command down
-				else
-					keystroke "t" using command down
-				end if
-				delay settleSecs
-			else
-				delay 0.15
+	try
+		tell application "System Events"
+			if not (exists process "Ghostty") then
+				error "Ghostty process not found for UI automation (native also failed: " & nativeErrText & ")"
 			end if
+			tell process "Ghostty"
+				set frontmost to true
+				delay 0.1
 
-			keystroke "u" using control down
-			delay 0.06
-			keystroke "v" using command down
-			delay 0.3
-			keystroke return
+				if createdSurface is false then
+					if openMode is "window" then
+						keystroke "n" using command down
+					else
+						keystroke "t" using command down
+					end if
+					delay settleSecs
+				else
+					delay 0.15
+				end if
+
+				keystroke "u" using control down
+				delay 0.06
+				keystroke "v" using command down
+				delay 0.3
+				keystroke return
+			end tell
 		end tell
-	end tell
+	on error fallbackErr number fallbackErrNum
+		try
+			set the clipboard to oldClip
+		end try
+		error fallbackErr number fallbackErrNum
+	end try
 
 	delay 0.12
 	try
-		if oldClip is missing value then
-			set the clipboard to ""
-		else
-			set the clipboard to oldClip
-		end if
+		set the clipboard to oldClip
 	end try
 	return "fallback"
 end run

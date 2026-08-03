@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -42,6 +41,22 @@ A2 = "aaaa0000-0000-4000-8000-00000000a002"
 LIVE = "aaaa0000-0000-4000-8000-00000000a003"
 
 
+def write_new_or_verify(path: Path, content: str) -> None:
+    """Create a fixture, or prove an existing fixture already has the same bytes.
+
+    The repository-wide agent contract forbids destructive cleanup and silent
+    overwrites. A stale or hand-edited fixture therefore fails loudly instead
+    of being recursively deleted and regenerated.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = path.read_text(encoding="utf-8")
+        if existing != content:
+            raise RuntimeError(f"fixture differs; refusing to overwrite: {path}")
+        return
+    path.write_text(content, encoding="utf-8")
+
+
 def write_codex(root: Path, sid: str, mtime: float, *, subagent: bool = False) -> None:
     d = root / "codex" / "2026" / "08" / "01"
     d.mkdir(parents=True, exist_ok=True)
@@ -52,7 +67,7 @@ def write_codex(root: Path, sid: str, mtime: float, *, subagent: bool = False) -
         {"type": "session_meta", "timestamp": "t", "payload": payload},
         {"type": "response_item", "timestamp": "t", "payload": {"kind": "message"}},
     ]
-    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    write_new_or_verify(p, "\n".join(json.dumps(x) for x in lines) + "\n")
     os.utime(p, (mtime, mtime))
 
 
@@ -65,7 +80,7 @@ def write_claude(
     line: dict = {"type": "user", "sessionId": sid, "message": {"role": "user", "content": "hi"}}
     if with_cwd:
         line["cwd"] = "/tmp"
-    p.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    write_new_or_verify(p, json.dumps(line) + "\n")
     os.utime(p, (mtime, mtime))
 
 
@@ -73,9 +88,7 @@ def main() -> int:
     meta = json.loads((HERE / "meta.json").read_text(encoding="utf-8"))
     boot = float(meta["fake_boot"])
 
-    if GEN.exists():
-        shutil.rmtree(GEN)
-    GEN.mkdir(parents=True)
+    GEN.mkdir(parents=True, exist_ok=True)
 
     write_codex(GEN, C1, boot - 40)
     write_codex(GEN, C2, boot - 30)
@@ -87,11 +100,11 @@ def main() -> int:
     write_claude(GEN, "-tmp", A2, boot - 20, with_cwd=False)
     write_claude(GEN, "-tmp-projB", LIVE, boot + 600, with_cwd=True)
 
-    (GEN / "ps.txt").write_text(
+    write_new_or_verify(
+        GEN / "ps.txt",
         "/bin/zsh -il\n"
         f"node /opt/cc/cli.js cod resume {C4}\n"
         "grep unrelated-text somefile\n",
-        encoding="utf-8",
     )
 
     ids = {
@@ -99,7 +112,7 @@ def main() -> int:
         "IDLE_FAR": IDLE_FAR, "IDLE_NEAR": IDLE_NEAR,
         "A1": A1, "A2_decode": A2, "LIVE": LIVE,
     }
-    (GEN / "ids.json").write_text(json.dumps(ids, indent=2) + "\n", encoding="utf-8")
+    write_new_or_verify(GEN / "ids.json", json.dumps(ids, indent=2) + "\n")
     print(f"fixtures generated under {GEN}")
     return 0
 

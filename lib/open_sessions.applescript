@@ -48,20 +48,38 @@ on run argv
 		end try
 
 		set term to missing value
+		set newTab to missing value
+		set newWindow to missing value
 		if openMode is "window" then
-			set w to new window with configuration cfg
+			set newWindow to new window with configuration cfg
 			delay settleSecs
-			set term to focused terminal of selected tab of w
+			try
+				set term to focused terminal of selected tab of newWindow
+			on error
+				delay 0.25
+				set term to focused terminal of selected tab of newWindow
+			end try
 		else
 			try
 				set win to front window
-				set t to new tab in win with configuration cfg
-				delay settleSecs
-				set term to focused terminal of t
+				set newTab to new tab in win with configuration cfg
 			on error
-				set w to new window with configuration cfg
-				delay settleSecs
-				set term to focused terminal of selected tab of w
+				set newWindow to new window with configuration cfg
+			end try
+			delay settleSecs
+			try
+				if newTab is not missing value then
+					set term to focused terminal of newTab
+				else
+					set term to focused terminal of selected tab of newWindow
+				end if
+			on error
+				delay 0.25
+				if newTab is not missing value then
+					set term to focused terminal of newTab
+				else
+					set term to focused terminal of selected tab of newWindow
+				end if
 			end try
 		end if
 

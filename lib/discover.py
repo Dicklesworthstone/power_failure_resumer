@@ -579,6 +579,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Display order: newest first (provider is secondary only for ties)
     cluster.sort(key=lambda s: (-s.mtime, s.provider, s.session_id))
 
+    # Score confidence on the FULL cluster before any display limit truncates it.
+    conf_level: Optional[str] = None
+    conf_reasons: List[str] = []
+    try:
+        import confidence as _confidence
+
+        conf_level, conf_reasons = _confidence.score_confidence(
+            mode=mode,
+            boot_time=boot,
+            anchor_mtime=anchor,
+            window_seconds=args.window,
+            pre_boot_lookback=args.pre_boot_lookback,
+            session_count=len(cluster),
+            skipped_running=skipped_running,
+            session_mtimes=[s.mtime for s in cluster],
+        )
+    except ImportError:
+        pass
+
     # Limit keeps the newest N (already sorted by -mtime)
     if args.limit and len(cluster) > args.limit:
         cluster = cluster[: args.limit]
@@ -590,12 +609,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "anchor_mtime": anchor,
         "anchor_mtime_human": fmt_ts(anchor),
         "window_seconds": args.window,
+        "pre_boot_lookback": args.pre_boot_lookback,
         "lookback_hours": args.lookback_hours,
         "total_candidates_scanned": total_candidates,
         "skipped_running": skipped_running,
         "sessions": [asdict(s) for s in cluster],
         "session_count": len(cluster),
     }
+    if conf_level is not None:
+        result["confidence"] = conf_level
+        result["confidence_reasons"] = conf_reasons
     json.dump(result, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0

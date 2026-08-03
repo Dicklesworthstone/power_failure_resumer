@@ -36,6 +36,7 @@ NO_SAVE_PLAN=0
 FORCE_STALE_PLAN=0
 PLAN_SAVED_TO=""
 DOCTOR=0
+NOTIFY=0
 # Cleaned up by the EXIT trap; pre-set so plan-load runs (which skip
 # discovery) don't trip `set -u` when the trap fires.
 DISCOVER_ERR=""
@@ -74,6 +75,7 @@ DISCOVERY:
   --force-reopen        Offer sessions even if a live process already resumed them
   --limit N             Cap listed/opened sessions (keeps newest)
   --json                Print discovery JSON and exit
+  --notify              Quietly save a qualifying plan and send a desktop notification; never opens tabs
 
 ISOLATION (tests / non-standard setups):
   --codex-root PATH     Codex sessions dir (default: \$CODEX_HOME/sessions)
@@ -114,7 +116,8 @@ LAUNCH:
 
 ENVIRONMENT:
   PFR_WINDOW, PFR_LOOKBACK_HOURS, PFR_PRE_BOOT_LOOKBACK, PFR_PROVIDERS,
-  PFR_OPEN_MODE, PFR_DRIVER, PFR_DELAY, PFR_SETTLE, PFR_MAX_OPEN
+  PFR_OPEN_MODE, PFR_DRIVER, PFR_DELAY, PFR_SETTLE, PFR_MAX_OPEN,
+  PFR_NOTIFY_CMD (optional notification-command override)
 
 EXAMPLES:
   ./power_failure_resumer.sh --dry-run
@@ -324,6 +327,7 @@ while [[ $# -gt 0 ]]; do
     --no-save-plan) NO_SAVE_PLAN=1; shift ;;
     --force-stale-plan) FORCE_STALE_PLAN=1; shift ;;
     --doctor) DOCTOR=1; shift ;;
+    --notify) NOTIFY=1; shift ;;
     --limit) need_arg "$@"; LIMIT="$2"; shift 2 ;;
     --json) JSON_OUT=1; shift ;;
     -n|--dry-run) DRY_RUN=1; shift ;;
@@ -340,6 +344,16 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown argument: $1 (try --help)" ;;
   esac
 done
+
+if (( NOTIFY && (JSON_OUT || DOCTOR) )); then
+  die "--notify cannot be combined with --json or --doctor"
+fi
+if (( NOTIFY )) && [[ -n "$PLAN_PATH" ]]; then
+  die "--notify always runs fresh discovery; do not combine it with --plan or --last-plan"
+fi
+if (( NOTIFY && NO_SAVE_PLAN )); then
+  die "--notify requires last-plan persistence; do not combine it with --no-save-plan"
+fi
 
 # Default driver per platform; validate driver ↔ platform pairing.
 if [[ -z "$DRIVER" ]]; then
@@ -545,7 +559,7 @@ require_number "--delay" "$DELAY_SECONDS"
 
 need_cmd python3
 [[ -f "$DISCOVER_PY" ]] || die "missing $DISCOVER_PY"
-if (( ! DRY_RUN && ! JSON_OUT )); then
+if (( ! DRY_RUN && ! JSON_OUT && ! NOTIFY )); then
   case "$DRIVER" in
     ui|api)
       need_cmd osascript
@@ -608,7 +622,9 @@ if [[ -n "$PLAN_PATH" ]]; then
     die "plan load failed (see message above)"
   fi
 else
-  log "scanning sessions (providers=${PROVIDERS}, mode=${MODE}, window=${WINDOW_SECONDS}s)…"
+  if (( ! NOTIFY )); then
+    log "scanning sessions (providers=${PROVIDERS}, mode=${MODE}, window=${WINDOW_SECONDS}s)…"
+  fi
   # discover.py: JSON on stdout, diagnostics on stderr — keep them separate.
   DISCOVER_ERR="$(tmpfile)"
   if ! JSON="$(python3 "$DISCOVER_PY" "${discover_args[@]}" 2>"$DISCOVER_ERR")"; then
@@ -618,6 +634,28 @@ else
   fi
   [[ -s "$DISCOVER_ERR" ]] && cat "$DISCOVER_ERR" >&2
   cleanup_files "$DISCOVER_ERR"
+
+  # --notify is discovery-only. Count only offered sessions, so the saved plan
+  # always contains work that remains available for the user to pick.
+  if (( NOTIFY )); then
+    NOTIFY_COUNT="$(python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+sessions = data.get("sessions")
+confidence = data.get("confidence")
+if not isinstance(sessions, list):
+    raise SystemExit(1)
+count = len(sessions)
+if count and (confidence == "high" or (confidence == "medium" and count >= 3)):
+    print(count)
+' <<<"$JSON")" || exit 0
+    if [[ -z "$NOTIFY_COUNT" ]]; then
+      exit 0
+    fi
+  fi
 
   # Persist the plan (discover once, open later) unless opted out.
   if (( ! NO_SAVE_PLAN )) || [[ -n "$SAVE_PLAN_PATH" ]]; then
@@ -631,9 +669,12 @@ else
         plan_save_args=(save --state-dir "$STATE_DIR")
         [[ -n "$SAVE_PLAN_PATH" ]] && plan_save_args+=(--extra-path "$SAVE_PLAN_PATH")
       fi
-      if PLAN_INFO="$(printf '%s' "$JSON" | python3 "$PLAN_PY" "${plan_save_args[@]}")"; then
+      if PLAN_INFO="$(printf '%s' "$JSON" | python3 "$PLAN_PY" "${plan_save_args[@]}" 2>/dev/null)"; then
         PLAN_SAVED_TO="$(printf '%s' "$PLAN_INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["saved"])' 2>/dev/null || true)"
       else
+        if (( NOTIFY )); then
+          exit 0
+        fi
         warn "could not save plan (continuing)"
         PLAN_SAVED_TO=""
       fi
@@ -641,6 +682,29 @@ else
   else
     PLAN_SAVED_TO=""
   fi
+fi
+
+send_notification() {
+  local session_count="$1"
+  local notification_body
+  notification_body="${session_count} session(s) ready — run: pfr --last-plan --pick"
+
+  if [[ -n "${PFR_NOTIFY_CMD:-}" ]]; then
+    "$PFR_NOTIFY_CMD" "pfr" "$notification_body" >/dev/null 2>&1 || true
+  elif [[ "$PLATFORM" == "Darwin" ]]; then
+    osascript - "$notification_body" >/dev/null 2>&1 <<'APPLESCRIPT' || true
+on run argv
+  display notification (item 1 of argv) with title "pfr"
+end run
+APPLESCRIPT
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "pfr" "$notification_body" >/dev/null 2>&1 || true
+  fi
+}
+
+if (( NOTIFY )); then
+  send_notification "$NOTIFY_COUNT"
+  exit 0
 fi
 
 if (( JSON_OUT )); then

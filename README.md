@@ -140,6 +140,16 @@ blackout → boot → pfr --dry-run   → review list + confidence
 
 From a checkout without installing: `./power_failure_resumer.sh …` and `./scripts/run_tests.sh`.
 
+## Post-boot notification
+
+`pfr --notify` is a quiet, discovery-only post-boot check. It saves a fresh
+`last-plan.json` and sends a desktop notification only for a `high` confidence
+cluster, or a `medium` confidence cluster with at least three resumeable
+sessions. The notification suggests `pfr --last-plan --pick`; it never opens
+Ghostty, even if launch flags such as `-y` are also present. macOS uses
+`osascript`; Linux uses `notify-send` when available. See
+[`docs/autoboot.md`](docs/autoboot.md) for a `RunAtLoad` LaunchAgent example.
+
 ## Command reference
 
 ### Discovery

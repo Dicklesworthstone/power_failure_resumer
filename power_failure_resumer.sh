@@ -828,6 +828,7 @@ else
   fi
 fi
 
+ATTEMPTS_FILE="$(tmpfile)"
 i=0
 while IFS=$'\t' read -r provider sid cwd mt resume_cmd title || [[ -n "${provider:-}" ]]; do
   [[ -z "${provider:-}" ]] && continue
@@ -836,8 +837,10 @@ while IFS=$'\t' read -r provider sid cwd mt resume_cmd title || [[ -n "${provide
   printf '  [%d/%d] %s  %s\n' "$i" "$SEL_COUNT" "$provider" "$short_cwd"
   if open_one "$cwd" "$resume_cmd"; then
     OPEN_OKS=$((OPEN_OKS + 1))
+    printf '%s\t%s\t%s\t1\n' "$provider" "$sid" "$cwd" >> "$ATTEMPTS_FILE"
   else
     OPEN_FAILS=$((OPEN_FAILS + 1))
+    printf '%s\t%s\t%s\t0\n' "$provider" "$sid" "$cwd" >> "$ATTEMPTS_FILE"
     warn "failed to open: $provider $sid ($short_cwd)"
   fi
   if (( ! DRY_RUN )) && [[ "$i" -lt "$SEL_COUNT" ]]; then
@@ -847,6 +850,7 @@ done < "$SELECTED_FILE"
 
 echo
 if (( DRY_RUN )); then
+  rm -f "$ATTEMPTS_FILE"
   log "dry-run complete — re-run with -y (or answer y) to open."
   if [[ -n "$PLAN_SAVED_TO" ]]; then
     log "plan saved: ${PLAN_SAVED_TO}  (confidence=${CONFIDENCE}, ${SEL_COUNT} sessions)"
@@ -854,8 +858,34 @@ if (( DRY_RUN )); then
   fi
 else
   log "done: ${OPEN_OKS} opened, ${OPEN_FAILS} failed (of ${SEL_COUNT})."
+  VERIFY_RC=0
+  if [[ "${PFR_VERIFY:-1}" != "0" ]]; then
+    log "verifying resumes (up to ${PFR_VERIFY_TIMEOUT:-15}s)…"
+    verify_args=(--timeout "${PFR_VERIFY_TIMEOUT:-15}" --state-dir "$STATE_DIR"
+                 --driver "$DRIVER" --open-mode "$OPEN_MODE")
+    [[ -n "$PS_FILE" ]] && verify_args+=(--ps-file "$PS_FILE")
+    if VERIFY_OUT="$(python3 "${ROOT}/lib/verify.py" "${verify_args[@]}" < "$ATTEMPTS_FILE")"; then
+      :
+    else
+      VERIFY_RC=1
+    fi
+    if [[ -n "${VERIFY_OUT:-}" ]]; then
+      VERIFIED="$(printf '%s' "$VERIFY_OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["verified"])' 2>/dev/null || echo "?")"
+      UNVERIFIED="$(printf '%s' "$VERIFY_OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(", ".join(d["unverified"]))' 2>/dev/null || true)"
+      log "verified:      ${VERIFIED}/${OPEN_OKS} resumed sessions visible in ps"
+      log "report:        ${STATE_DIR}/last-report.json"
+      if [[ -n "$UNVERIFIED" ]]; then
+        warn "no process evidence for: ${UNVERIFIED}"
+        warn "check those tabs — the resume command may not have executed (try larger --settle)."
+      fi
+    fi
+  fi
+  rm -f "$ATTEMPTS_FILE"
   if (( OPEN_FAILS > 0 )); then
     warn "partial resume — re-run with --pick for the failures."
+    exit 1
+  fi
+  if (( VERIFY_RC != 0 )); then
     exit 1
   fi
   log "tip: if a tab only shows a shell, press Up or re-run with a larger --settle."

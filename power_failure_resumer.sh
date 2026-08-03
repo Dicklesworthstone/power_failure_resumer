@@ -25,6 +25,10 @@ DRIVER="${PFR_DRIVER:-}"                # ui | api (macOS) | ghostty (Linux); de
 DELAY_SECONDS="${PFR_DELAY:-}"          # empty → pick sensible default per driver
 SETTLE_SECONDS="${PFR_SETTLE:-0.55}"    # wait after creating a surface for shell
 MAX_OPEN="${PFR_MAX_OPEN:-40}"
+CODEX_ROOT="${PFR_CODEX_ROOT:-}"        # override discover.py --codex-root (tests)
+CLAUDE_ROOT="${PFR_CLAUDE_ROOT:-}"      # override discover.py --claude-root (tests)
+FAKE_BOOT="${PFR_FAKE_BOOT:-}"          # override boot epoch (tests)
+STATE_DIR="${PFR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pfr}"
 PROJECTS_ONLY=0
 INCLUDE_SUBAGENTS=0
 FORCE_REOPEN=0
@@ -58,6 +62,12 @@ DISCOVERY:
   --force-reopen        Offer sessions even if a live process already resumed them
   --limit N             Cap listed/opened sessions (keeps newest)
   --json                Print discovery JSON and exit
+
+ISOLATION (tests / non-standard setups):
+  --codex-root PATH     Codex sessions dir (default: \$CODEX_HOME/sessions)
+  --claude-root PATH    Claude projects dir (default: \$CLAUDE_HOME/projects)
+  --fake-boot EPOCH     Pretend the system booted at this epoch time
+  --state-dir PATH      Where plans/reports are written (default: ~/.local/state/pfr)
 
 LAUNCH:
   --dry-run, -n         List only; do not open Ghostty
@@ -218,6 +228,10 @@ while [[ $# -gt 0 ]]; do
     --projects-only) PROJECTS_ONLY=1; shift ;;
     --include-subagents) INCLUDE_SUBAGENTS=1; shift ;;
     --force-reopen) FORCE_REOPEN=1; shift ;;
+    --codex-root) need_arg "$@"; CODEX_ROOT="$2"; shift 2 ;;
+    --claude-root) need_arg "$@"; CLAUDE_ROOT="$2"; shift 2 ;;
+    --fake-boot) need_arg "$@"; FAKE_BOOT="$2"; shift 2 ;;
+    --state-dir) need_arg "$@"; STATE_DIR="$2"; shift 2 ;;
     --limit) need_arg "$@"; LIMIT="$2"; shift 2 ;;
     --json) JSON_OUT=1; shift ;;
     -n|--dry-run) DRY_RUN=1; shift ;;
@@ -311,6 +325,16 @@ if (( FORCE_REOPEN )); then
 fi
 if (( LIMIT > 0 )); then
   discover_args+=(--limit "$LIMIT")
+fi
+if [[ -n "$CODEX_ROOT" ]]; then
+  discover_args+=(--codex-root "$CODEX_ROOT")
+fi
+if [[ -n "$CLAUDE_ROOT" ]]; then
+  discover_args+=(--claude-root "$CLAUDE_ROOT")
+fi
+if [[ -n "$FAKE_BOOT" ]]; then
+  require_number "--fake-boot" "$FAKE_BOOT"
+  discover_args+=(--fake-boot "$FAKE_BOOT")
 fi
 
 # Empty provider list is a silent footgun (spaces/commas only)

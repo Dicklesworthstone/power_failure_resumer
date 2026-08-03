@@ -440,6 +440,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Read process args from this file instead of ps (for tests)",
     )
     ap.add_argument(
+        "--fake-boot",
+        type=float,
+        default=None,
+        help="Override detected boot time with this epoch (tests; or PFR_FAKE_BOOT)",
+    )
+    ap.add_argument(
         "--mode",
         choices=("auto", "pre_boot", "density", "recent"),
         default="auto",
@@ -500,7 +506,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     total_candidates = len(sessions)
 
-    boot = get_boot_time()
+    fake_boot = args.fake_boot
+    if fake_boot is None and os.environ.get("PFR_FAKE_BOOT"):
+        try:
+            fake_boot = float(os.environ["PFR_FAKE_BOOT"])
+        except ValueError:
+            eprint("warning: ignoring non-numeric PFR_FAKE_BOOT")
+    boot = fake_boot if fake_boot is not None else get_boot_time()
     mode = args.mode
     anchor: Optional[float] = args.anchor
     cluster: List[Session] = []

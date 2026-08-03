@@ -50,6 +50,25 @@ class ClaudeTitleTest(unittest.TestCase):
         self.assertEqual(title, "Review project for bugs")
         self.assertEqual(preview, "look for bugs please")
 
+    def test_title_appended_after_head_scan_is_found(self):
+        p = tmp_jsonl("late-title", [
+            user_line("first question"),
+            *({"type": "progress", "n": i} for i in range(250)),
+            {"type": "custom-title", "customTitle": "late custom title"},
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertEqual(title, "late custom title")
+        self.assertEqual(preview, "first question")
+
+    def test_non_string_title_is_ignored(self):
+        p = tmp_jsonl("bad-title", [
+            {"type": "custom-title", "customTitle": {"not": "text"}},
+            user_line("usable title"),
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertEqual(title, "usable title")
+        self.assertEqual(preview, "usable title")
+
     def test_falls_back_to_first_user_and_skips_boilerplate(self):
         p = tmp_jsonl("fallback", [
             user_line("<system-reminder>ignore me</system-reminder>"),

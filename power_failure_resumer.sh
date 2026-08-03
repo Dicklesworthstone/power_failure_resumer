@@ -881,6 +881,11 @@ if [[ "${PFR_STATUS_TAB:-1}" != "0" ]]; then
   elif mkdir -p "$STATE_DIR" 2>/dev/null \
       && chmod 700 "$STATE_DIR" 2>/dev/null \
       && (umask 077; : > "$RUN_LOG") 2>/dev/null; then
+    # Keep the newest 10 run logs; these are per-run and would pile up forever.
+    # shellcheck disable=SC2012  # filenames are self-generated, no odd chars
+    ls -1t "$STATE_DIR"/run-*.log 2>/dev/null | tail -n +11 | while IFS= read -r old_log; do
+      rm -f -- "$old_log"
+    done
     run_log_header
     log "run log: ${RUN_LOG}"
     status_cmd="$(printf 'tail -n +1 -f %q' "$RUN_LOG")"

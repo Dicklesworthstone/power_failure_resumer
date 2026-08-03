@@ -109,22 +109,28 @@ def running_session_ids(ps_text: Optional[str] = None) -> set:
         except ValueError:
             continue
 
-        agent_seen = False
         for index, token in enumerate(tokens):
             if Path(token).name.lower() in _AGENT_EXECUTABLES:
-                agent_seen = True
-                continue
-            if not agent_seen:
-                continue
-
-            candidate: Optional[str] = None
-            if token in ("resume", "--resume") and index + 1 < len(tokens):
-                candidate = tokens[index + 1]
-            elif token.startswith("--resume="):
-                candidate = token.partition("=")[2]
-
-            if candidate and UUID_RE.fullmatch(candidate):
-                ids.add(candidate.lower())
+                # Inspect this agent's argv only. A bare `resume` immediately
+                # following another option is likely that option's value (for
+                # example `codex --search resume UUID`), not the subcommand.
+                for arg_index in range(index + 1, len(tokens)):
+                    arg = tokens[arg_index]
+                    candidate: Optional[str] = None
+                    if arg == "--resume" and arg_index + 1 < len(tokens):
+                        candidate = tokens[arg_index + 1]
+                    elif arg.startswith("--resume="):
+                        candidate = arg.partition("=")[2]
+                    elif (
+                        arg == "resume"
+                        and arg_index + 1 < len(tokens)
+                        and not tokens[arg_index - 1].startswith("-")
+                    ):
+                        candidate = tokens[arg_index + 1]
+                    if candidate and UUID_RE.fullmatch(candidate):
+                        ids.add(candidate.lower())
+                        break
+                break
     return ids
 
 
@@ -201,6 +207,26 @@ def _clean_snippet(text: str, limit: int = 160) -> str:
     return text
 
 
+def _tail_lines(path: Path, max_bytes: int = 256 * 1024) -> List[str]:
+    """Return complete lines from a bounded tail of ``path``.
+
+    Claude title records are often appended late in long transcripts. Reading
+    a bounded tail finds them without loading multi-megabyte sessions into
+    memory or rescanning every line during discovery.
+    """
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            start = max(0, size - max_bytes)
+            fh.seek(start)
+            if start:
+                fh.readline()  # discard a partial first line
+            return fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
 _BOILERPLATE_PREFIXES = (
     "# AGENTS.md", "<INSTRUCTIONS", "<environment_context", "<system-reminder",
     "<local-command", "<command-name", "Caveat:",
@@ -232,21 +258,49 @@ def extract_claude_identity(path: Path, max_lines: int = 200) -> Tuple[str, str]
                     continue
                 typ = obj.get("type")
                 if typ == "custom-title" and not custom:
-                    custom = str(obj.get("customTitle") or obj.get("title") or "")
+                    value = obj.get("customTitle") or obj.get("title")
+                    custom = value if isinstance(value, str) else ""
                 elif typ == "ai-title" and not ai:
-                    ai = str(obj.get("aiTitle") or "")
+                    value = obj.get("aiTitle")
+                    ai = value if isinstance(value, str) else ""
                 elif typ == "summary" and not summary:
-                    summary = str(obj.get("summary") or "")
+                    value = obj.get("summary")
+                    summary = value if isinstance(value, str) else ""
                 elif typ == "user" and not first_user:
                     msg = obj.get("message")
                     if isinstance(msg, dict) and msg.get("role") == "user":
                         text = _first_text_block(msg.get("content"))
                         if text.strip() and not _is_boilerplate(text):
                             first_user = text
-                if custom and first_user:
-                    break
     except OSError:
         pass
+
+    # A custom/AI title can be appended after hundreds of transcript events.
+    # Search a bounded tail whenever the highest-priority title was not found
+    # in the head. This is deliberately title-only: the preview remains the
+    # first user message, not a later message that happens to be in the tail.
+    if not custom:
+        for line in _tail_lines(path):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            typ = obj.get("type")
+            if typ == "custom-title":
+                value = obj.get("customTitle") or obj.get("title")
+                if isinstance(value, str) and value:
+                    custom = value
+                    break
+            if typ == "ai-title" and not ai:
+                value = obj.get("aiTitle")
+                if isinstance(value, str):
+                    ai = value
+            elif typ == "summary" and not summary:
+                value = obj.get("summary")
+                if isinstance(value, str):
+                    summary = value
     title = _clean_snippet(custom or ai or summary or first_user, 80)
     return title, _clean_snippet(first_user)
 

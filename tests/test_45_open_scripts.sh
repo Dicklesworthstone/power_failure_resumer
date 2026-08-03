@@ -6,58 +6,94 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 API="$PFR_ROOT/lib/open_sessions.applescript"
 UI="$PFR_ROOT/lib/open_sessions_ui.applescript"
 
-osacompile -o /dev/null "$API" || fail "open_sessions.applescript must compile"
-osacompile -o /dev/null "$UI" || fail "open_sessions_ui.applescript must compile"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  osacompile -o /dev/null "$API" || fail "open_sessions.applescript must compile"
+  osacompile -o /dev/null "$UI" || fail "open_sessions_ui.applescript must compile"
+fi
 
-api_source="$(<"$API")"
-ui_source="$(<"$UI")"
-cli_source="$(<"$PFR")"
-
-# Both drivers accept the same semantic core: cwd, command, mode, and an
-# optional settle delay. The UI driver retains its ignored fourth is_first
-# compatibility slot, so its settle delay intentionally occupies argv 5.
-for source in "$api_source" "$ui_source"; do
-  assert_contains "$source" "set workDir to item 1 of argv as text" "driver reads cwd from argv[1]"
-  assert_contains "$source" "set resumeCmd to item 2 of argv as text" "driver reads resume command from argv[2]"
-  assert_contains "$source" "if (count of argv) ≥ 3 then set openMode to item 3 of argv as text" "driver reads mode from argv[3]"
-  assert_contains "$source" "set lineToType to \"cd \" & my shellQuote(workDir) & \" && \" & resumeCmd" "driver builds cwd plus command"
-  assert_contains "$source" "input text lineToType & linefeed" "driver submits the reconstructed command"
-done
-assert_contains "$api_source" "item 4 of argv as real" "API driver reads settle from argv[4]"
-assert_contains "$ui_source" "argv 4 (is_first) ignored" "UI driver documents compatibility slot"
-assert_contains "$ui_source" "item 5 of argv as real" "UI driver reads settle from argv[5]"
-assert_contains "$cli_source" 'osascript "$OPEN_API_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "$SETTLE_SECONDS"' "CLI passes API argv contract"
-assert_contains "$cli_source" 'osascript "$OPEN_UI_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "0" "$SETTLE_SECONDS"' "CLI passes UI argv contract"
-
-# The only new-surface keystrokes in the fallback must be textually inside the
-# createdSurface=false guard. A native-created surface that later rejects input
-# must receive pasted input without a second Cmd+T/Cmd+N.
-python3 - "$UI" <<'PY' || fail "fallback may open a duplicate surface"
+# Parse executable lines instead of grepping raw source, so comments cannot
+# satisfy an invariant. The block matcher also verifies that Cmd+T/Cmd+N stay
+# nested under the actual createdSurface=false branch.
+python3 - "$API" "$UI" "$PFR" <<'PY' || fail "open script contract regression"
 from pathlib import Path
+import re
 import sys
 
-source = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+
+def executable_lines(path: str) -> list[str]:
+    return [
+        line.strip()
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("--") and not line.lstrip().startswith("#")
+    ]
+
+
+def require(lines: list[str], statement: str, label: str) -> None:
+    assert statement in lines, f"{label}: missing executable statement {statement!r}"
+
+
+def require_prefix(lines: list[str], statement: str, label: str) -> None:
+    assert any(line.startswith(statement) for line in lines), (
+        f"{label}: missing executable statement prefix {statement!r}"
+    )
+
+
+api, ui, cli = map(executable_lines, sys.argv[1:])
+core = (
+    "set workDir to item 1 of argv as text",
+    "set resumeCmd to item 2 of argv as text",
+    "if (count of argv) ≥ 3 then set openMode to item 3 of argv as text",
+    'set lineToType to "cd " & my shellQuote(workDir) & " && " & resumeCmd',
+)
+for name, source, input_line in (
+    ("API", api, "input text lineToType & linefeed to term"),
+    ("UI", ui, "input text lineToType & linefeed to termObj"),
+):
+    for statement in core:
+        require(source, statement, f"{name} argv/command contract")
+    assert source.count(input_line) == 2, f"{name} must retry native input exactly once"
+
+require(api, "set settleSecs to (item 4 of argv as real)", "API settle argv contract")
+require(ui, "set settleSecs to (item 5 of argv as real)", "UI settle argv contract")
+require_prefix(cli, 'osascript "$OPEN_API_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "$SETTLE_SECONDS"', "CLI API argv contract")
+require_prefix(cli, 'osascript "$OPEN_UI_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "0" "$SETTLE_SECONDS"', "CLI UI argv contract")
+
+native_create = re.compile(r"set new(?:Tab|Window) to new (?:tab(?: in win)?|window) with configuration cfg")
+for index, line in enumerate(ui):
+    if native_create.fullmatch(line):
+        assert ui[index + 1:index + 2] == ["set createdSurface to true"], (
+            f"native creation at line {index + 1} does not mark createdSurface"
+        )
+
 guard = "if createdSurface is false then"
-start = source.find(guard)
-assert start >= 0, "missing createdSurface guard"
-end = source.find("\n\t\t\t\tend if", start)
-assert end >= 0, "createdSurface guard has no closing end if"
-guarded = source[start:end]
-for key in ('keystroke "n" using command down', 'keystroke "t" using command down'):
-    assert source.count(key) == 1, f"expected exactly one {key!r}"
-    assert key in guarded, f"{key!r} is not protected by createdSurface=false"
-fallback = source[start:source.index('keystroke "u" using control down', start)]
-assert 'my waitForShellPrompt(missing value, settleSecs)' not in fallback, (
+stack: list[str] = []
+keys = ('keystroke "n" using command down', 'keystroke "t" using command down')
+seen = {key: 0 for key in keys}
+inside_guard: list[str] = []
+for line in ui:
+    if line.startswith("if ") and line.endswith(" then"):
+        stack.append(line)
+        continue
+    if line == "end if":
+        assert stack, "unbalanced AppleScript end if"
+        stack.pop()
+        continue
+    if guard in stack:
+        inside_guard.append(line)
+    if line in seen:
+        seen[line] += 1
+        assert guard in stack, f"{line!r} is not guarded by createdSurface=false"
+assert not stack, "unbalanced AppleScript if block"
+assert all(count == 1 for count in seen.values()), "expected one Cmd+N and one Cmd+T creation path"
+assert "my waitForShellPrompt(missing value, settleSecs)" not in inside_guard, (
     "fallback must not probe an unbound front window after Cmd+T/Cmd+N"
 )
-assert 'delay settleSecs' in fallback, "fallback must retain its fixed post-open settle"
-PY
+assert "delay settleSecs" in inside_guard, "fallback must retain its fixed post-open settle"
 
-# The UI fallback can replace the clipboard only if it preserves and restores
-# the original native value on both the normal and error paths.
-assert_contains "$ui_source" "set oldClip to the clipboard" "fallback saves clipboard"
-assert_contains "$ui_source" "set the clipboard to lineToType" "fallback stages command in clipboard"
-restore_count="$(grep -Fc 'set the clipboard to oldClip' "$UI")"
-[[ "$restore_count" -ge 2 ]] || fail "fallback must restore clipboard on normal and error paths"
+require(ui, "set oldClip to the clipboard", "fallback saves clipboard")
+require(ui, "set the clipboard to lineToType", "fallback stages command")
+assert ui.count("set the clipboard to oldClip") >= 2, "fallback must restore clipboard on error and success"
+PY
 
 echo "open script invariants OK"

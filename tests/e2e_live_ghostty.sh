@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Opt-in macOS smoke: create one UI-driver tab and verify its fixture UUID in
-# the real process table. The helper deliberately remains under tests/logs/ so
-# its evidence is retained under the repository no-deletion rule.
+# Opt-in macOS smoke: create one UI-driver tab and verify a fresh UUID in the
+# real process table. The helper deliberately remains under tests/logs/ so its
+# evidence is retained under the repository no-deletion rule.
 if [[ "${PFR_LIVE:-}" != "1" ]]; then
   echo "skipped (PFR_LIVE!=1)"
   exit 0
@@ -13,13 +13,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 command -v osascript >/dev/null 2>&1 || fail "PFR_LIVE=1 requires osascript"
 
 UI="$PFR_ROOT/lib/open_sessions_ui.applescript"
-SID="$(python3 - "$FIX/ids.json" <<'PY'
-import json
-import sys
-
-print(json.load(open(sys.argv[1], encoding="utf-8"))["C1"])
+SID="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
 PY
-)" || fail "could not load fixture session UUID"
+)" || fail "could not create live-smoke UUID"
 SD="$(new_state_dir pfr-live-ghostty)"
 LIVE_COD="$SD/cod"
 

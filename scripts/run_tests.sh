@@ -39,12 +39,19 @@ log_event event=fixtures status=ok
 
 pass=0
 fail=0
+skip=0
 found=0
 failed_names=""
 for t in "$TESTS_DIR"/test_*.sh "$TESTS_DIR"/test_*.py "$TESTS_DIR"/e2e_*.sh; do
   [[ -e "$t" ]] || continue
   found=$((found + 1))
   name="$(basename "$t")"
+  if [[ "$name" == "e2e_live_ghostty.sh" && "${PFR_LIVE:-}" != "1" ]]; then
+    skip=$((skip + 1))
+    log_event event=result "test=$name" status=skip reason=PFR_LIVE_not_1
+    echo "SKIP ${name} (PFR_LIVE!=1)"
+    continue
+  fi
   out="$OUT_DIR/${name}.log"
   start="$(date +%s)"
   log_event event=start "test=$name"
@@ -69,13 +76,13 @@ for t in "$TESTS_DIR"/test_*.sh "$TESTS_DIR"/test_*.py "$TESTS_DIR"/e2e_*.sh; do
   fi
 done
 
-log_event event=summary "pass=$pass" "fail=$fail" "total=$found"
+log_event event=summary "pass=$pass" "fail=$fail" "skip=$skip" "total=$found"
 echo
 if (( found == 0 )); then
   echo "summary: no tests found (tests/test_*.sh|py)"
   exit 1
 fi
-echo "summary: ${pass} passed, ${fail} failed of ${found}  (ndjson: ${NDJSON})"
+echo "summary: ${pass} passed, ${fail} failed, ${skip} skipped of ${found}  (ndjson: ${NDJSON})"
 if (( fail > 0 )); then
   echo "failed:${failed_names}"
   exit 1

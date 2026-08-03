@@ -40,7 +40,7 @@ pass=0
 fail=0
 found=0
 failed_names=""
-for t in "$TESTS_DIR"/test_*.sh "$TESTS_DIR"/test_*.py; do
+for t in "$TESTS_DIR"/test_*.sh "$TESTS_DIR"/test_*.py "$TESTS_DIR"/e2e_*.sh; do
   [[ -e "$t" ]] || continue
   found=$((found + 1))
   name="$(basename "$t")"

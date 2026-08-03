@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -32,6 +34,8 @@ UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.I,
 )
+
+_AGENT_EXECUTABLES = frozenset({"cc", "claude", "cod", "codex"})
 
 
 @dataclass
@@ -55,7 +59,9 @@ def eprint(*args: object) -> None:
 def get_boot_time() -> Optional[float]:
     """Return system boot time as epoch seconds (macOS/Linux best-effort)."""
     try:
-        out = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True)
+        out = subprocess.check_output(
+            ["sysctl", "-n", "kern.boottime"], text=True, timeout=2.0
+        )
         m = re.search(r"sec\s*=\s*(\d+)", out)
         if m:
             return float(m.group(1))
@@ -70,15 +76,6 @@ def get_boot_time() -> Optional[float]:
     return None
 
 
-# UUID immediately after a resume flag: `resume UUID`, `--resume UUID`, `--resume=UUID`
-_RESUME_UUID_RE = re.compile(
-    # Quotes/escapes may sit before the UUID: `sh -c "cc --resume 'id'"` (or
-    # nested \"id\") argv strings keep their inner quoting in ps output.
-    r"(?:^|[\s\"'])(?:--)?resume(?:\s+|=)[\"'\\]*(" + UUID_RE.pattern + r")",
-    re.I,
-)
-
-
 def running_session_ids(ps_text: Optional[str] = None) -> set:
     """Session UUIDs from live process args that look like an active resume.
 
@@ -86,9 +83,10 @@ def running_session_ids(ps_text: Optional[str] = None) -> set:
     second pfr run does not re-open sessions already brought back. Fresh (never
     resumed) sessions carry no UUID in argv and cannot be detected this way.
 
-    Matching is tight: the UUID must sit right after a resume flag, not merely
-    share a command line that happens to mention both words (avoids false
-    positives from editors/logs).
+    Matching is tight: an actual Codex/Claude executable token must precede the
+    resume flag, and the following value must be exactly one UUID. This avoids
+    treating unrelated programs with ``--resume`` flags (or searches containing
+    example commands) as live agent sessions.
 
     `ps_text` lets tests inject a canned process table.
     """
@@ -96,14 +94,36 @@ def running_session_ids(ps_text: Optional[str] = None) -> set:
         try:
             # BSD no-dash syntax: valid on both macOS ps and Linux procps.
             ps_text = subprocess.check_output(
-                ["ps", "axo", "args="], text=True, stderr=subprocess.DEVNULL
+                ["ps", "axo", "args="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=5.0,
             )
         except Exception:
             return set()
     ids: set = set()
     for line in ps_text.splitlines():
-        for m in _RESUME_UUID_RE.finditer(line):
-            ids.add(m.group(1).lower())
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            continue
+
+        agent_seen = False
+        for index, token in enumerate(tokens):
+            if Path(token).name.lower() in _AGENT_EXECUTABLES:
+                agent_seen = True
+                continue
+            if not agent_seen:
+                continue
+
+            candidate: Optional[str] = None
+            if token in ("resume", "--resume") and index + 1 < len(tokens):
+                candidate = tokens[index + 1]
+            elif token.startswith("--resume="):
+                candidate = token.partition("=")[2]
+
+            if candidate and UUID_RE.fullmatch(candidate):
+                ids.add(candidate.lower())
     return ids
 
 
@@ -165,6 +185,13 @@ def extract_uuid_from_name(name: str) -> Optional[str]:
     return m.group(0) if m else None
 
 
+def validated_uuid(value: object) -> Optional[str]:
+    """Return a UUID string only when the complete value is safe to resume."""
+    if not isinstance(value, str):
+        return None
+    return value if UUID_RE.fullmatch(value) else None
+
+
 def is_codex_subagent(meta_payload: dict) -> bool:
     if meta_payload.get("thread_source") == "subagent":
         return True
@@ -205,13 +232,16 @@ def discover_codex(sessions_root: Path, since_mtime: float) -> List[Session]:
         # Prefer the filename UUID: always present and correct even when the first JSON
         # object is not session_meta (payload.id could then be an event id, not the rollout).
         # Do not prefer parent session_id — that can point at a different thread.
-        resume_id = file_id or payload.get("id") or payload.get("session_id")
+        resume_id = (
+            validated_uuid(file_id)
+            or validated_uuid(payload.get("id"))
+            or validated_uuid(payload.get("session_id"))
+        )
         if not resume_id:
             continue
-        resume_id = str(resume_id)
 
         cwd = payload.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
+        if not isinstance(cwd, str) or not Path(cwd).is_absolute():
             cwd = str(Path.home() / "projects")
 
         sub = is_codex_subagent(payload) if payload else False
@@ -322,7 +352,8 @@ def densest_cluster(
     ordered = sorted(sessions, key=lambda s: s.mtime)
     times = [s.mtime for s in ordered]
     best_count = 0
-    best_lo = times[0]
+    best_start = 0
+    best_end = 1
     best_hi = times[0]
     j = 0
     for i, t in enumerate(times):
@@ -333,14 +364,14 @@ def densest_cluster(
         # Prefer denser; on tie, prefer the newer window (higher hi)
         if count > best_count or (count == best_count and hi >= best_hi):
             best_count = count
-            best_lo = t
+            best_start = i
+            best_end = j
             best_hi = hi
 
     anchor = best_hi
-    # Inclusive window with tiny float slack
-    cluster = [s for s in sessions if best_lo - 0.5 <= s.mtime <= best_hi + 0.5]
-    if not cluster:
-        cluster = [s for s in sessions if abs(s.mtime - anchor) <= window]
+    # Return the exact winning slice. Reconstructing it with tolerance can pull
+    # adjacent sessions outside the requested window and inflate the cluster.
+    cluster = ordered[best_start:best_end]
     cluster.sort(key=lambda s: s.mtime, reverse=True)
     return cluster, anchor
 
@@ -459,6 +490,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = ap.parse_args(argv)
 
+    nonnegative_floats = {
+        "--window": args.window,
+        "--lookback-hours": args.lookback_hours,
+        "--pre-boot-lookback": args.pre_boot_lookback,
+        "--pre-boot-slack": args.pre_boot_slack,
+    }
+    for option, value in nonnegative_floats.items():
+        if not math.isfinite(value) or value < 0:
+            ap.error(f"{option} must be a finite non-negative number")
+    if args.anchor is not None and not math.isfinite(args.anchor):
+        ap.error("--anchor must be finite")
+    if args.fake_boot is not None and not math.isfinite(args.fake_boot):
+        ap.error("--fake-boot must be finite")
+    if args.min_cluster < 1:
+        ap.error("--min-cluster must be at least 1")
+    if args.limit < 0:
+        ap.error("--limit must be non-negative")
+
     now = time.time()
     since = now - args.lookback_hours * 3600.0
     providers = {p.strip().lower() for p in args.providers.split(",") if p.strip()}
@@ -510,8 +559,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if fake_boot is None and os.environ.get("PFR_FAKE_BOOT"):
         try:
             fake_boot = float(os.environ["PFR_FAKE_BOOT"])
+            if not math.isfinite(fake_boot):
+                raise ValueError
         except ValueError:
-            eprint("warning: ignoring non-numeric PFR_FAKE_BOOT")
+            eprint("warning: ignoring non-finite or non-numeric PFR_FAKE_BOOT")
+            fake_boot = None
     boot = fake_boot if fake_boot is not None else get_boot_time()
     mode = args.mode
     anchor: Optional[float] = args.anchor
@@ -569,6 +621,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cluster = [s for s in sessions if abs(s.mtime - anchor) <= args.window]
         mode = "manual_anchor"
 
+    # Snapshot the full chosen pocket (including already-running) for confidence.
+    # Filtering first would shrink mtime span / size and mis-score the crash.
+    full_cluster = list(cluster)
+
     # Drop already-running members of the *chosen* cluster (unless forced).
     skipped_running = 0
     if not args.force_reopen:
@@ -579,7 +635,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Display order: newest first (provider is secondary only for ties)
     cluster.sort(key=lambda s: (-s.mtime, s.provider, s.session_id))
 
-    # Score confidence on the FULL cluster before any display limit truncates it.
+    # Score confidence on the FULL pocket (pre-filter, pre-limit).
     conf_level: Optional[str] = None
     conf_reasons: List[str] = []
     try:
@@ -593,12 +649,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pre_boot_lookback=args.pre_boot_lookback,
             session_count=len(cluster),
             skipped_running=skipped_running,
-            session_mtimes=[s.mtime for s in cluster],
+            session_mtimes=[s.mtime for s in full_cluster],
         )
     except ImportError:
         pass
 
-    # Limit keeps the newest N (already sorted by -mtime)
+    # Limit keeps the newest N (already sorted by -mtime). Confidence above is
+    # intentionally NOT recomputed after limit — a --limit 2 display must not
+    # demote a 16-session HIGH crash cluster to MEDIUM.
     if args.limit and len(cluster) > args.limit:
         cluster = cluster[: args.limit]
 

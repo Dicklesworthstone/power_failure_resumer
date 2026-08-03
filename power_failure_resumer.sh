@@ -28,6 +28,7 @@ MAX_OPEN="${PFR_MAX_OPEN:-40}"
 CODEX_ROOT="${PFR_CODEX_ROOT:-}"        # override discover.py --codex-root (tests)
 CLAUDE_ROOT="${PFR_CLAUDE_ROOT:-}"      # override discover.py --claude-root (tests)
 FAKE_BOOT="${PFR_FAKE_BOOT:-}"          # override boot epoch (tests)
+PS_FILE="${PFR_PS_FILE:-}"              # canned process table (tests)
 STATE_DIR="${PFR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pfr}"
 PLAN_PATH=""                            # --plan / --last-plan: open from a saved plan
 SAVE_PLAN_PATH=""                       # --save-plan: extra explicit plan copy
@@ -72,6 +73,7 @@ ISOLATION (tests / non-standard setups):
   --codex-root PATH     Codex sessions dir (default: \$CODEX_HOME/sessions)
   --claude-root PATH    Claude projects dir (default: \$CLAUDE_HOME/projects)
   --fake-boot EPOCH     Pretend the system booted at this epoch time
+  --ps-file PATH        Read process args from a file instead of ps
   --state-dir PATH      Where plans/reports are written (default: ~/.local/state/pfr)
 
 PLANS (discover once, open later):
@@ -244,6 +246,7 @@ while [[ $# -gt 0 ]]; do
     --codex-root) need_arg "$@"; CODEX_ROOT="$2"; shift 2 ;;
     --claude-root) need_arg "$@"; CLAUDE_ROOT="$2"; shift 2 ;;
     --fake-boot) need_arg "$@"; FAKE_BOOT="$2"; shift 2 ;;
+    --ps-file) need_arg "$@"; PS_FILE="$2"; shift 2 ;;
     --state-dir) need_arg "$@"; STATE_DIR="$2"; shift 2 ;;
     --plan) need_arg "$@"; PLAN_PATH="$2"; shift 2 ;;
     --last-plan) PLAN_PATH="__LAST__"; shift ;;
@@ -353,6 +356,9 @@ fi
 if [[ -n "$FAKE_BOOT" ]]; then
   require_number "--fake-boot" "$FAKE_BOOT"
   discover_args+=(--fake-boot "$FAKE_BOOT")
+fi
+if [[ -n "$PS_FILE" ]]; then
+  discover_args+=(--ps-file "$PS_FILE")
 fi
 
 # Empty provider list is a silent footgun (spaces/commas only)

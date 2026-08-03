@@ -35,6 +35,7 @@ SAVE_PLAN_PATH=""                       # --save-plan: extra explicit plan copy
 NO_SAVE_PLAN=0
 FORCE_STALE_PLAN=0
 PLAN_SAVED_TO=""
+DOCTOR=0
 PROJECTS_ONLY=0
 INCLUDE_SUBAGENTS=0
 FORCE_REOPEN=0
@@ -83,6 +84,10 @@ PLANS (discover once, open later):
   --save-plan PATH      Also write the plan to an explicit path
   --no-save-plan        Do not write last-plan.json for this run
   --force-stale-plan    Use a plan even if the machine rebooted since / plan >24h old
+
+HEALTH:
+  --doctor              Check environment health (Ghostty, scripting, dirs); exit 0 when healthy
+                        Combine with --json for machine-readable results
 
 LAUNCH:
   --dry-run, -n         List only; do not open Ghostty
@@ -192,8 +197,11 @@ open_one_ghostty() {
   local resume_cmd="$2"
   # Linux: no scripting API — spawn one window per session via the ghostty CLI.
   # Interactive shell (-i) so cod/cc aliases from rc files resolve.
+  # Quote resume_cmd for -c so future non-UUID args cannot break the shell.
+  local qcmd
+  printf -v qcmd '%q' "$resume_cmd"
   nohup ghostty --working-directory="$cwd" \
-    -e "${SHELL:-/bin/sh}" -ic "$resume_cmd" >/dev/null 2>&1 &
+    -e "${SHELL:-/bin/sh}" -ic "$qcmd" >/dev/null 2>&1 &
   disown 2>/dev/null || true
 }
 
@@ -253,6 +261,7 @@ while [[ $# -gt 0 ]]; do
     --save-plan) need_arg "$@"; SAVE_PLAN_PATH="$2"; shift 2 ;;
     --no-save-plan) NO_SAVE_PLAN=1; shift ;;
     --force-stale-plan) FORCE_STALE_PLAN=1; shift ;;
+    --doctor) DOCTOR=1; shift ;;
     --limit) need_arg "$@"; LIMIT="$2"; shift 2 ;;
     --json) JSON_OUT=1; shift ;;
     -n|--dry-run) DRY_RUN=1; shift ;;
@@ -293,6 +302,129 @@ case "$OPEN_MODE" in
   *) die "invalid open mode '$OPEN_MODE' (use --tabs or --windows)" ;;
 esac
 
+# ── doctor ──────────────────────────────────────────────────────────────────
+# Environment health checks. PFR_DOCTOR_SIM_MISSING="ghostty,osascript" lets
+# tests simulate absent dependencies.
+doctor_sim_missing() { [[ ",${PFR_DOCTOR_SIM_MISSING:-}," == *",$1,"* ]]; }
+
+doctor_run() {
+  local -a c_name=() c_status=() c_detail=()
+  add_check() { c_name+=("$1"); c_status+=("$2"); c_detail+=("$3"); }
+
+  if ! doctor_sim_missing python3 && command -v python3 >/dev/null 2>&1; then
+    add_check python3 ok "$(python3 -V 2>&1)"
+  else
+    add_check python3 fail "python3 not found in PATH"
+  fi
+
+  local f libs_missing=""
+  for f in "$DISCOVER_PY" "${ROOT}/lib/plan.py" "${ROOT}/lib/confidence.py"; do
+    [[ -f "$f" ]] || libs_missing="${libs_missing} $(basename "$f")"
+  done
+  if [[ -z "$libs_missing" ]]; then
+    add_check lib_files ok "discover.py plan.py confidence.py present"
+  else
+    add_check lib_files fail "missing:${libs_missing}"
+  fi
+
+  if mkdir -p "$STATE_DIR" 2>/dev/null && : > "${STATE_DIR}/.doctor-probe" 2>/dev/null; then
+    rm -f "${STATE_DIR}/.doctor-probe"
+    add_check state_dir ok "$STATE_DIR writable"
+  else
+    add_check state_dir fail "$STATE_DIR not writable"
+  fi
+
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    if ! doctor_sim_missing osascript && command -v osascript >/dev/null 2>&1; then
+      add_check osascript ok "osascript present"
+    else
+      add_check osascript fail "osascript not found (required for ui/api drivers)"
+    fi
+    if [[ -f "$OPEN_UI_AS" && -f "$OPEN_API_AS" ]]; then
+      add_check applescripts ok "driver scripts present"
+    else
+      add_check applescripts fail "driver .applescript files missing under lib/"
+    fi
+    if ! doctor_sim_missing ghostty && open -Ra Ghostty 2>/dev/null; then
+      add_check ghostty_app ok "Ghostty.app installed"
+    else
+      add_check ghostty_app fail "Ghostty.app not found (install from https://ghostty.org)"
+    fi
+    # Automation probe: only meaningful when Ghostty is already running.
+    if ghostty_is_running 2>/dev/null; then
+      local probe
+      if probe="$(osascript -e 'tell application "System Events" to return (exists process "Ghostty")' 2>&1)"; then
+        add_check automation ok "System Events reachable (probe: ${probe})"
+      else
+        add_check automation warn "System Events probe failed — grant Automation (and Accessibility for keystroke fallback): ${probe}"
+      fi
+    else
+      add_check automation ok "not probed (Ghostty not running)"
+    fi
+  else
+    if ! doctor_sim_missing ghostty && command -v ghostty >/dev/null 2>&1; then
+      add_check ghostty_cli ok "$(command -v ghostty)"
+    else
+      add_check ghostty_cli fail "ghostty not found in PATH (Linux driver needs it; dry-run still works)"
+    fi
+  fi
+
+  local codex_dir claude_dir
+  codex_dir="${CODEX_ROOT:-${CODEX_HOME:-$HOME/.codex}/sessions}"
+  claude_dir="${CLAUDE_ROOT:-${CLAUDE_HOME:-$HOME/.claude}/projects}"
+  [[ -d "$codex_dir" ]] && add_check codex_root ok "$codex_dir" \
+    || add_check codex_root warn "$codex_dir missing (no codex sessions will be found)"
+  [[ -d "$claude_dir" ]] && add_check claude_root ok "$claude_dir" \
+    || add_check claude_root warn "$claude_dir missing (no claude sessions will be found)"
+
+  command -v fzf >/dev/null 2>&1 \
+    && add_check fzf ok "$(command -v fzf) (nicer --pick)" \
+    || add_check fzf warn "fzf not found — --pick falls back to numeric prompt"
+  command -v am >/dev/null 2>&1 \
+    && add_check agent_mail ok "am found — will open an agent-mail tab first" \
+    || add_check agent_mail warn "am not found — no agent-mail tab (optional)"
+
+  local fails=0 i
+  for i in "${!c_name[@]}"; do
+    [[ "${c_status[$i]}" == "fail" ]] && fails=$((fails + 1))
+  done
+
+  if (( JSON_OUT )); then
+    for i in "${!c_name[@]}"; do
+      printf '%s\t%s\t%s\n' "${c_name[$i]}" "${c_status[$i]}" "${c_detail[$i]}"
+    done | python3 -c '
+import json, sys
+checks = []
+for line in sys.stdin:
+    name, status, detail = line.rstrip("\n").split("\t", 2)
+    checks.append({"name": name, "status": status, "detail": detail})
+healthy = all(c["status"] != "fail" for c in checks)
+print(json.dumps({"healthy": healthy, "checks": checks}, indent=2))'
+  else
+    local mark
+    for i in "${!c_name[@]}"; do
+      case "${c_status[$i]}" in
+        ok)   mark="✓" ;;
+        warn) mark="⚠" ;;
+        *)    mark="✗" ;;
+      esac
+      printf '%s %-12s %s\n' "$mark" "${c_name[$i]}" "${c_detail[$i]}"
+    done
+    echo
+    if (( fails == 0 )); then
+      log "doctor: healthy"
+    else
+      warn "doctor: ${fails} failing check(s)"
+    fi
+  fi
+  (( fails == 0 ))
+}
+
+if (( DOCTOR )); then
+  doctor_run
+  exit $?
+fi
+
 case "$MODE" in
   auto|pre_boot|density|recent) ;;
   *) die "invalid --mode '$MODE'" ;;
@@ -317,16 +449,16 @@ require_number "--delay" "$DELAY_SECONDS"
 
 need_cmd python3
 [[ -f "$DISCOVER_PY" ]] || die "missing $DISCOVER_PY"
-case "$DRIVER" in
-  ui|api)
-    need_cmd osascript
-    [[ -f "$OPEN_API_AS" ]] || die "missing $OPEN_API_AS"
-    [[ -f "$OPEN_UI_AS" ]] || die "missing $OPEN_UI_AS"
-    ;;
-  ghostty)
-    (( DRY_RUN )) || need_cmd ghostty
-    ;;
-esac
+if (( ! DRY_RUN && ! JSON_OUT )); then
+  case "$DRIVER" in
+    ui|api)
+      need_cmd osascript
+      [[ -f "$OPEN_API_AS" ]] || die "missing $OPEN_API_AS"
+      [[ -f "$OPEN_UI_AS" ]] || die "missing $OPEN_UI_AS"
+      ;;
+    ghostty) need_cmd ghostty ;;
+  esac
+fi
 
 discover_args=(
   --window "$WINDOW_SECONDS"
@@ -367,9 +499,11 @@ if [[ -z "${PROVIDERS//[ ,]}" ]]; then
 fi
 
 PLAN_PY="${ROOT}/lib/plan.py"
+[[ -f "$PLAN_PY" ]] || die "missing $PLAN_PY"
 [[ "$PLAN_PATH" == "__LAST__" ]] && PLAN_PATH="${STATE_DIR}/last-plan.json"
 
 if [[ -n "$PLAN_PATH" ]]; then
+  [[ -f "$PLAN_PY" ]] || die "missing $PLAN_PY (needed to load plans)"
   log "loading plan: ${PLAN_PATH}"
   plan_load_args=(load --path "$PLAN_PATH")
   (( FORCE_STALE_PLAN )) && plan_load_args+=(--force)
@@ -391,13 +525,18 @@ else
 
   # Persist the plan (discover once, open later) unless opted out.
   if (( ! NO_SAVE_PLAN )) || [[ -n "$SAVE_PLAN_PATH" ]]; then
-    plan_save_args=(save --state-dir "$STATE_DIR")
-    [[ -n "$SAVE_PLAN_PATH" ]] && plan_save_args+=(--extra-path "$SAVE_PLAN_PATH")
-    if PLAN_INFO="$(printf '%s' "$JSON" | python3 "$PLAN_PY" "${plan_save_args[@]}")"; then
-      PLAN_SAVED_TO="$(printf '%s' "$PLAN_INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["saved"])' 2>/dev/null || true)"
-    else
-      warn "could not save plan (continuing)"
+    if [[ ! -f "$PLAN_PY" ]]; then
+      warn "missing $PLAN_PY — plan not saved"
       PLAN_SAVED_TO=""
+    else
+      plan_save_args=(save --state-dir "$STATE_DIR")
+      [[ -n "$SAVE_PLAN_PATH" ]] && plan_save_args+=(--extra-path "$SAVE_PLAN_PATH")
+      if PLAN_INFO="$(printf '%s' "$JSON" | python3 "$PLAN_PY" "${plan_save_args[@]}")"; then
+        PLAN_SAVED_TO="$(printf '%s' "$PLAN_INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["saved"])' 2>/dev/null || true)"
+      else
+        warn "could not save plan (continuing)"
+        PLAN_SAVED_TO=""
+      fi
     fi
   else
     PLAN_SAVED_TO=""
@@ -416,37 +555,71 @@ MAP_FILE=""
 trap 'rm -f "$SESS_FILE" "$SELECTED_FILE" ${MAP_FILE:+"$MAP_FILE"} ${DISCOVER_ERR:+"$DISCOVER_ERR"}' EXIT
 
 # Write TSV + print meta lines for the shell.
-# JSON is passed via env to avoid ARG_MAX issues with large discovery payloads.
+# Feed JSON over stdin. Environment variables share the execve ARG_MAX budget,
+# so putting a large discovery payload in PFR_JSON can fail on wide clusters.
 META="$(
-  PFR_JSON="$JSON" PFR_SESS_OUT="$SESS_FILE" python3 <<'PY'
-import json, os, sys
+  PFR_SESS_OUT="$SESS_FILE" python3 /dev/fd/3 <<<"$JSON" 3<<'PY'
+import json, os, re, sys, unicodedata
 from datetime import date, datetime
 
 try:
-    data = json.loads(os.environ["PFR_JSON"])
+    data = json.load(sys.stdin)
 except Exception as e:
     print(f"failed to parse discovery JSON: {e}", file=sys.stderr)
     sys.exit(1)
 
+uuid_re = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.I,
+)
+
+def clean(x: object) -> str:
+    # TSV is both a transport and terminal display boundary. Replace all
+    # control characters so metadata cannot split records or emit escapes.
+    return "".join(
+        " " if unicodedata.category(ch) == "Cc" else ch for ch in str(x)
+    )
+
 out_path = os.environ["PFR_SESS_OUT"]
 lines = []
 today = date.today()
-for s in data.get("sessions") or []:
-    dt = datetime.fromtimestamp(s["mtime"])
+sessions = data.get("sessions") or []
+if not isinstance(sessions, list):
+    print("invalid discovery JSON: sessions must be a list", file=sys.stderr)
+    sys.exit(1)
+for index, s in enumerate(sessions):
+    if not isinstance(s, dict):
+        print(f"invalid discovery JSON: sessions[{index}] must be an object", file=sys.stderr)
+        sys.exit(1)
+    provider = s.get("provider")
+    sid = s.get("session_id")
+    cwd = s.get("cwd")
+    if provider not in ("codex", "claude"):
+        print(f"invalid session provider at index {index}: {provider!r}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(sid, str) or not uuid_re.fullmatch(sid):
+        print(f"invalid session UUID at index {index}: {sid!r}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(cwd, str) or not cwd.startswith("/"):
+        print(f"invalid session cwd at index {index}: {cwd!r}", file=sys.stderr)
+        sys.exit(1)
+    resume_cmd = f"cod resume {sid}" if provider == "codex" else f"cc --resume {sid}"
+    try:
+        dt = datetime.fromtimestamp(float(s["mtime"]))
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as e:
+        print(f"invalid session mtime at index {index}: {e}", file=sys.stderr)
+        sys.exit(1)
     # Lookback spans days; an undated time would make a stale cluster look current.
     mt = dt.strftime("%H:%M:%S") if dt.date() == today else dt.strftime("%m-%d %H:%M")
-
-    def clean(x: object) -> str:
-        return str(x).replace("\t", " ").replace("\n", " ")
 
     lines.append(
         "\t".join(
             [
-                clean(s["provider"]),
-                clean(s["session_id"]),
-                clean(s["cwd"]),
+                clean(provider),
+                clean(sid),
+                clean(cwd),
                 clean(mt),
-                clean(s["resume_cmd"]),
+                resume_cmd,
                 clean(s.get("title") or ""),
             ]
         )
@@ -456,14 +629,15 @@ with open(out_path, "w", encoding="utf-8") as fh:
     if lines:
         fh.write("\n")
 
-print(data.get("boot_time_human") or "unknown")
-print(data.get("mode") or "")
-print(data.get("anchor_mtime_human") or "")
+print(clean(data.get("boot_time_human") or "unknown"))
+print(clean(data.get("mode") or ""))
+print(clean(data.get("anchor_mtime_human") or ""))
 print(len(lines))
-print(data.get("total_candidates_scanned") or 0)
-print(data.get("skipped_running") or 0)
-print(data.get("confidence") or "unknown")
-print(", ".join(data.get("confidence_reasons") or []))
+print(clean(data.get("total_candidates_scanned") or 0))
+print(clean(data.get("skipped_running") or 0))
+print(clean(data.get("confidence") or "unknown"))
+reasons = data.get("confidence_reasons") or []
+print(clean(", ".join(str(reason) for reason in reasons)))
 PY
 )"
 
@@ -617,8 +791,31 @@ if [[ "${SEL_COUNT}" -gt "${MAX_OPEN}" ]]; then
   die "refusing to open ${SEL_COUNT} sessions (cap is ${MAX_OPEN}). Re-run with --max ${SEL_COUNT} if intentional."
 fi
 
+# Hub sessions (cwd exactly ~/projects, /data/projects, or /dp) go first so
+# they land right after the agent-mail tab. Stable sort keeps newest-first
+# order within each group.
+ORDER_TMP="$(tmpfile)"
+awk -F'\t' -v home="$HOME" 'BEGIN{OFS=FS}
+  { pri = ($3 == home "/projects" || $3 == "/data/projects" || $3 == "/dp") ? 0 : 1
+    printf "%d\t%s\n", pri, $0 }' "$SELECTED_FILE" \
+  | sort -s -t$'\t' -k1,1n | cut -f2- > "$ORDER_TMP"
+mv "$ORDER_TMP" "$SELECTED_FILE"
+
 if (( ! DRY_RUN )) && [[ "$DRIVER" != "ghostty" ]]; then
   ensure_ghostty   # ghostty CLI driver spawns its own windows; no pre-launch needed
+fi
+
+# Agent-mail tab: when `am` is installed, open it FIRST so the mail hub is
+# tab 1. Disable with PFR_AM=0; PFR_AM_BIN overrides the binary (tests).
+AM_BIN="${PFR_AM_BIN:-am}"
+if [[ "${PFR_AM:-1}" != "0" && -n "$AM_BIN" ]] && command -v "$AM_BIN" >/dev/null 2>&1; then
+  if (( DRY_RUN )); then
+    open_one "$HOME" "$AM_BIN"
+  else
+    log "opening agent-mail tab (${AM_BIN}) first…"
+    open_one "$HOME" "$AM_BIN" || warn "failed to open agent-mail tab"
+    sleep "$DELAY_SECONDS"
+  fi
 fi
 
 if (( DRY_RUN )); then

@@ -11,7 +11,7 @@ import io
 import json
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,6 +91,14 @@ class DensestClusterTest(unittest.TestCase):
         tight, _ = densest_cluster(pocket + stray, 180)
         self.assertEqual({s.session_id for s in tight}, {"a", "b", "c"})
 
+    def test_exact_window_does_not_absorb_adjacent_session(self):
+        # Three equal low endpoints make [0, 180] the unique densest window.
+        # The old ±0.5 reconstruction incorrectly absorbed 180.4 as a fifth item.
+        c, anchor = densest_cluster([S(0), S(0), S(0), S(180), S(180.4)], 180)
+        self.assertEqual(sorted(s.mtime for s in c), [0, 0, 0, 180])
+        self.assertEqual(anchor, 180)
+        self.assertLessEqual(max(s.mtime for s in c) - min(s.mtime for s in c), 180)
+
 
 class DedupeTest(unittest.TestCase):
     def test_keeps_newest_per_provider_and_id(self):
@@ -100,6 +108,36 @@ class DedupeTest(unittest.TestCase):
         self.assertEqual(len(best), 2)
         codex = next(s for s in best if s.provider == "codex")
         self.assertEqual(codex.mtime, 20)
+
+
+class InputBoundaryTest(unittest.TestCase):
+    def test_running_detection_ignores_other_resume_flags_and_searches(self):
+        ps_text = "\n".join([
+            "/opt/codex --search resume 11111111-1111-1111-1111-111111111111",
+            "/Users/me/.local/bin/claude --resume=22222222-2222-2222-2222-222222222222",
+            "python worker.py --resume 33333333-3333-3333-3333-333333333333",
+            'rg "cod resume 44444444-4444-4444-4444-444444444444" README.md',
+        ])
+        self.assertEqual(
+            discover.running_session_ids(ps_text),
+            {
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222",
+            },
+        )
+
+    def test_resume_id_must_be_exact_uuid(self):
+        good = "11111111-1111-1111-1111-111111111111"
+        self.assertEqual(discover.validated_uuid(good), good)
+        self.assertIsNone(discover.validated_uuid(good + "; touch /tmp/pwned"))
+        self.assertIsNone(discover.validated_uuid(123))
+
+    def test_nonfinite_and_negative_cli_values_are_rejected(self):
+        for argv in (["--window", "nan"], ["--limit", "-1"], ["--min-cluster", "0"]):
+            with self.subTest(argv=argv):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                    discover.main(argv)
+                self.assertEqual(raised.exception.code, 2)
 
 
 class FixtureDiscoveryTest(unittest.TestCase):

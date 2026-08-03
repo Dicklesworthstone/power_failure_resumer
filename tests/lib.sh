@@ -11,6 +11,9 @@ FAKE_BOOT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['fak
 FIX_ARGS=(--codex-root "$FIX/codex" --claude-root "$FIX/claude"
           --fake-boot "$FAKE_BOOT" --lookback-hours 8760000)
 
+# Deterministic runs: no agent-mail tab unless a test opts in explicitly.
+export PFR_AM=0
+
 fail() { echo "ASSERT FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "${3:-}: expected '$2', got '$1'"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "${3:-}: missing '$2' in: $1"; }

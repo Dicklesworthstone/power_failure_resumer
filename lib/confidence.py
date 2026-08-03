@@ -99,8 +99,16 @@ def build_plan(discovery: Dict, created_at: str) -> Dict:
     """Build a schema-v1 resume plan from a discover.py result dict.
 
     ``created_at`` is injected (ISO-8601) so plan construction stays pure.
+
+    Prefer confidence fields already set by discover.py (scored on the full crash
+    pocket before --limit truncation). Re-scoring the truncated session list would
+    falsely demote HIGH → MEDIUM when the user passed --limit.
     """
-    confidence, reasons = score_discovery(discovery)
+    if discovery.get("confidence") is not None and "confidence_reasons" in discovery:
+        conf = str(discovery["confidence"])
+        reasons = list(discovery.get("confidence_reasons") or [])
+    else:
+        conf, reasons = score_discovery(discovery)
     sessions = []
     for s in discovery.get("sessions") or []:
         entry = {k: s.get(k) for k in _SESSION_FIELDS if k in s}
@@ -115,7 +123,7 @@ def build_plan(discovery: Dict, created_at: str) -> Dict:
         "window_seconds": discovery.get("window_seconds"),
         "pre_boot_lookback": discovery.get("pre_boot_lookback"),
         "anchor_mtime": discovery.get("anchor_mtime"),
-        "confidence": confidence,
+        "confidence": conf,
         "confidence_reasons": reasons,
         "total_candidates_scanned": discovery.get("total_candidates_scanned"),
         "skipped_running": discovery.get("skipped_running"),

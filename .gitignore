@@ -6,3 +6,4 @@ tests/logs/
 # bv (beads viewer) local config and caches
 .bv/
 tests/fixtures/generated/
+pfr_illustration.png

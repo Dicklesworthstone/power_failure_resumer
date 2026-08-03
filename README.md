@@ -1,4 +1,8 @@
 <div align="center">
+  <img src="pfr_illustration.webp" alt="power_failure_resumer illustration" width="720">
+</div>
+
+<div align="center">
 
 # power_failure_resumer
 

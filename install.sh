@@ -85,7 +85,11 @@ done
 
 # ── output stack: gum when available, ANSI fallback ─────────────────────────
 HAS_GUM=0
-if command -v gum >/dev/null 2>&1 && [[ -t 1 ]]; then
+# PFR_INSTALLER_FORCE_GUM=1 lets tests exercise the styled path without a
+# tty; the flag-parse regression ("-> text" read as a gum flag) only ever
+# manifested on gum-capable terminals the suite could not reach.
+if command -v gum >/dev/null 2>&1 \
+    && { [[ -t 1 ]] || [[ "${PFR_INSTALLER_FORCE_GUM:-0}" == "1" ]]; }; then
   HAS_GUM=1
 fi
 use_gum() { [[ "$HAS_GUM" -eq 1 && "$NO_GUM" -eq 0 ]]; }

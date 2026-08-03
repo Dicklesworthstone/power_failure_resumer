@@ -36,6 +36,11 @@ NO_SAVE_PLAN=0
 FORCE_STALE_PLAN=0
 PLAN_SAVED_TO=""
 DOCTOR=0
+# Cleaned up by the EXIT trap; pre-set so plan-load runs (which skip
+# discovery) don't trip `set -u` when the trap fires.
+DISCOVER_ERR=""
+ORDERED_FILE=""
+MAP_FILE=""
 PROJECTS_ONLY=0
 INCLUDE_SUBAGENTS=0
 FORCE_REOPEN=0
@@ -171,6 +176,14 @@ tmpfile() {
   mktemp "${TMPDIR:-/tmp}/pfr.XXXXXX"
 }
 
+cleanup_files() {
+  [[ "${PFR_KEEP_TEMPS:-0}" == "1" ]] && return 0
+  local path
+  for path in "$@"; do
+    [[ -n "$path" ]] && rm -f -- "$path"
+  done
+}
+
 # macOS reports the full binary path as the process name, so `pgrep -x Ghostty`
 # never matches. Prefer System Events (process name "Ghostty"), then path match.
 ghostty_is_running() {
@@ -216,11 +229,11 @@ open_one_ghostty() {
   local resume_cmd="$2"
   # Linux: no scripting API — spawn one window per session via the ghostty CLI.
   # Interactive shell (-i) so cod/cc aliases from rc files resolve.
-  # Quote resume_cmd for -c so future non-UUID args cannot break the shell.
-  local qcmd
-  printf -v qcmd '%q' "$resume_cmd"
+  # resume_cmd is reconstructed from provider + validated UUID at the JSON/TSV
+  # boundary. Escaping the whole string with %q would turn it into one command
+  # name containing spaces instead of a command plus arguments.
   nohup ghostty --working-directory="$cwd" \
-    -e "${SHELL:-/bin/sh}" -ic "$qcmd" >/dev/null 2>&1 &
+    -e "${SHELL:-/bin/sh}" -ic "$resume_cmd" >/dev/null 2>&1 &
   disown 2>/dev/null || true
 }
 
@@ -346,9 +359,12 @@ doctor_run() {
     add_check lib_files fail "missing:${libs_missing}"
   fi
 
-  if mkdir -p "$STATE_DIR" 2>/dev/null && : > "${STATE_DIR}/.doctor-probe" 2>/dev/null; then
-    rm -f "${STATE_DIR}/.doctor-probe"
-    add_check state_dir ok "$STATE_DIR writable"
+  local state_parent="$STATE_DIR"
+  while [[ ! -e "$state_parent" && "$state_parent" != "/" ]]; do
+    state_parent="$(dirname "$state_parent")"
+  done
+  if [[ -d "$state_parent" && -w "$state_parent" && -x "$state_parent" ]]; then
+    add_check state_dir ok "$STATE_DIR creatable/writable (via $state_parent)"
   else
     add_check state_dir fail "$STATE_DIR not writable"
   fi
@@ -402,12 +418,22 @@ doctor_run() {
     add_check claude_root warn "$claude_dir missing (no claude sessions will be found)"
   fi
 
-  command -v fzf >/dev/null 2>&1 \
-    && add_check fzf ok "$(command -v fzf) (nicer --pick)" \
-    || add_check fzf warn "fzf not found — --pick falls back to numeric prompt"
-  command -v am >/dev/null 2>&1 \
-    && add_check agent_mail ok "am found — will open an agent-mail tab first" \
-    || add_check agent_mail warn "am not found — no agent-mail tab (optional)"
+  if command -v fzf >/dev/null 2>&1; then
+    add_check fzf ok "$(command -v fzf) (nicer --pick)"
+  else
+    add_check fzf warn "fzf not found — --pick falls back to numeric prompt"
+  fi
+  if command -v am >/dev/null 2>&1; then
+    add_check agent_mail ok "am found — recovery will open an agent-mail tab first"
+  else
+    add_check agent_mail warn "am not found — no agent-mail tab (optional)"
+  fi
+  local agent_cmds
+  if agent_cmds="$(zsh -lic 'type cod; type cc' 2>&1)"; then
+    add_check agent_commands ok "$agent_cmds"
+  else
+    add_check agent_commands warn "cod/cc not both resolvable in login zsh: $agent_cmds"
+  fi
 
   local fails=0 i
   for i in "${!c_name[@]}"; do
@@ -416,12 +442,17 @@ doctor_run() {
 
   if (( JSON_OUT )); then
     for i in "${!c_name[@]}"; do
-      printf '%s\t%s\t%s\n' "${c_name[$i]}" "${c_status[$i]}" "${c_detail[$i]}"
+      printf '%s\0%s\0%s\0' "${c_name[$i]}" "${c_status[$i]}" "${c_detail[$i]}"
     done | python3 -c '
 import json, sys
 checks = []
-for line in sys.stdin:
-    name, status, detail = line.rstrip("\n").split("\t", 2)
+fields = sys.stdin.buffer.read().split(b"\0")
+if fields and fields[-1] == b"":
+    fields.pop()
+if len(fields) % 3:
+    raise SystemExit("invalid doctor record framing")
+for offset in range(0, len(fields), 3):
+    name, status, detail = (field.decode("utf-8", "replace") for field in fields[offset:offset + 3])
     checks.append({"name": name, "status": status, "detail": detail})
 healthy = all(c["status"] != "fail" for c in checks)
 print(json.dumps({"healthy": healthy, "checks": checks}, indent=2))'
@@ -542,11 +573,11 @@ else
   DISCOVER_ERR="$(tmpfile)"
   if ! JSON="$(python3 "$DISCOVER_PY" "${discover_args[@]}" 2>"$DISCOVER_ERR")"; then
     [[ -s "$DISCOVER_ERR" ]] && cat "$DISCOVER_ERR" >&2
-    rm -f "$DISCOVER_ERR"
+    cleanup_files "$DISCOVER_ERR"
     die "discovery failed"
   fi
   [[ -s "$DISCOVER_ERR" ]] && cat "$DISCOVER_ERR" >&2
-  rm -f "$DISCOVER_ERR"
+  cleanup_files "$DISCOVER_ERR"
 
   # Persist the plan (discover once, open later) unless opted out.
   if (( ! NO_SAVE_PLAN )) || [[ -n "$SAVE_PLAN_PATH" ]]; then
@@ -554,8 +585,12 @@ else
       warn "missing $PLAN_PY — plan not saved"
       PLAN_SAVED_TO=""
     else
-      plan_save_args=(save --state-dir "$STATE_DIR")
-      [[ -n "$SAVE_PLAN_PATH" ]] && plan_save_args+=(--extra-path "$SAVE_PLAN_PATH")
+      if (( NO_SAVE_PLAN )); then
+        plan_save_args=(save --extra-only --extra-path "$SAVE_PLAN_PATH")
+      else
+        plan_save_args=(save --state-dir "$STATE_DIR")
+        [[ -n "$SAVE_PLAN_PATH" ]] && plan_save_args+=(--extra-path "$SAVE_PLAN_PATH")
+      fi
       if PLAN_INFO="$(printf '%s' "$JSON" | python3 "$PLAN_PY" "${plan_save_args[@]}")"; then
         PLAN_SAVED_TO="$(printf '%s' "$PLAN_INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["saved"])' 2>/dev/null || true)"
       else
@@ -576,8 +611,9 @@ fi
 SESS_FILE="$(tmpfile)"
 SELECTED_FILE="$(tmpfile)"
 MAP_FILE=""
+ORDERED_FILE=""
 # DISCOVER_ERR already removed on the happy path; include it so early die still cleans up.
-trap 'rm -f "$SESS_FILE" "$SELECTED_FILE" ${MAP_FILE:+"$MAP_FILE"} ${DISCOVER_ERR:+"$DISCOVER_ERR"}' EXIT
+trap 'cleanup_files "$SESS_FILE" "$SELECTED_FILE" "$MAP_FILE" "$ORDERED_FILE" "$DISCOVER_ERR"' EXIT
 
 # Write TSV + print meta lines for the shell.
 # Feed JSON over stdin. Environment variables share the execve ARG_MAX budget,
@@ -646,6 +682,7 @@ for index, s in enumerate(sessions):
                 clean(mt),
                 resume_cmd,
                 clean(s.get("title") or ""),
+                clean(s.get("preview") or ""),
             ]
         )
     )
@@ -707,7 +744,7 @@ fi
 
 printf '%s\n' "──── sessions to resume ────"
 n=0
-while IFS=$'\t' read -r provider sid cwd mt resume_cmd title || [[ -n "${provider:-}" ]]; do
+while IFS=$'\t' read -r provider sid cwd mt resume_cmd title preview || [[ -n "${provider:-}" ]]; do
   [[ -z "${provider:-}" ]] && continue
   n=$((n + 1))
   short_cwd="${cwd/#$HOME/~}"
@@ -716,6 +753,9 @@ while IFS=$'\t' read -r provider sid cwd mt resume_cmd title || [[ -n "${provide
   base="$(basename "$cwd")"
   if [[ -n "$title" && "$title" != "$base" ]]; then
     printf '      (%s)\n' "$title"
+  fi
+  if [[ -n "${preview:-}" && "$preview" != "$title" ]]; then
+    printf '      » %.100s\n' "$preview"
   fi
 done < "$SESS_FILE"
 echo
@@ -752,7 +792,7 @@ select_pick() {
         sed -n "${num}p" "$SESS_FILE" >> "$SELECTED_FILE"
       done <<< "$picked"
     fi
-    rm -f "$map"
+    cleanup_files "$map"
   else
     log "fzf not found — enter comma-separated numbers (e.g. 1,3,5) or 'all':"
     local choice num
@@ -824,7 +864,7 @@ awk -F'\t' -v home="$HOME" 'BEGIN{OFS=FS}
   { pri = ($3 == home "/projects" || $3 == "/data/projects" || $3 == "/dp") ? 0 : 1
     printf "%d\t%s\n", pri, $0 }' "$SELECTED_FILE" \
   | sort -s -t$'\t' -k1,1n | cut -f2- > "$ORDER_TMP"
-mv "$ORDER_TMP" "$SELECTED_FILE"
+ORDERED_FILE="$ORDER_TMP"
 
 if (( ! DRY_RUN )) && [[ "$DRIVER" != "ghostty" ]]; then
   ensure_ghostty   # ghostty CLI driver spawns its own windows; no pre-launch needed
@@ -833,19 +873,20 @@ fi
 # Tab 1 — live status: a Ghostty tab tailing this run's formatted log so the
 # whole resume is observable as it happens. Disable with PFR_STATUS_TAB=0.
 if [[ "${PFR_STATUS_TAB:-1}" != "0" ]]; then
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  RUN_LOG="${STATE_DIR}/last-run.log"
-  if : > "$RUN_LOG" 2>/dev/null; then
+  RUN_LOG="${STATE_DIR}/run-$(date +%Y%m%d_%H%M%S)-$$.log"
+  if (( DRY_RUN )); then
+    status_cmd="$(printf 'tail -n +1 -f %q' "$RUN_LOG")"
+    open_one "$HOME" "$status_cmd"
+    RUN_LOG=""
+  elif mkdir -p "$STATE_DIR" 2>/dev/null \
+      && chmod 700 "$STATE_DIR" 2>/dev/null \
+      && (umask 077; : > "$RUN_LOG") 2>/dev/null; then
     run_log_header
     log "run log: ${RUN_LOG}"
     status_cmd="$(printf 'tail -n +1 -f %q' "$RUN_LOG")"
-    if (( DRY_RUN )); then
-      open_one "$HOME" "$status_cmd"
-    else
-      log "opening status tab (live run log) first…"
-      open_one "$HOME" "$status_cmd" || warn "failed to open status tab"
-      sleep "$DELAY_SECONDS"
-    fi
+    log "opening status tab (live run log) first…"
+    open_one "$HOME" "$status_cmd" || warn "failed to open status tab"
+    sleep "$DELAY_SECONDS"
   else
     RUN_LOG=""
   fi
@@ -876,7 +917,7 @@ fi
 
 ATTEMPTS_FILE="$(tmpfile)"
 i=0
-while IFS=$'\t' read -r provider sid cwd mt resume_cmd title || [[ -n "${provider:-}" ]]; do
+while IFS=$'\t' read -r provider sid cwd mt resume_cmd title preview || [[ -n "${provider:-}" ]]; do
   [[ -z "${provider:-}" ]] && continue
   i=$((i + 1))
   short_cwd="${cwd/#$HOME/~}"
@@ -892,11 +933,11 @@ while IFS=$'\t' read -r provider sid cwd mt resume_cmd title || [[ -n "${provide
   if (( ! DRY_RUN )) && [[ "$i" -lt "$SEL_COUNT" ]]; then
     sleep "$DELAY_SECONDS"
   fi
-done < "$SELECTED_FILE"
+done < "$ORDERED_FILE"
 
 echo
 if (( DRY_RUN )); then
-  rm -f "$ATTEMPTS_FILE"
+  cleanup_files "$ATTEMPTS_FILE"
   log "dry-run complete — re-run with -y (or answer y) to open."
   if [[ -n "$PLAN_SAVED_TO" ]]; then
     log "plan saved: ${PLAN_SAVED_TO}  (confidence=${CONFIDENCE}, ${SEL_COUNT} sessions)"
@@ -926,7 +967,7 @@ else
       fi
     fi
   fi
-  rm -f "$ATTEMPTS_FILE"
+  cleanup_files "$ATTEMPTS_FILE"
   if (( OPEN_FAILS > 0 )); then
     warn "partial resume — re-run with --pick for the failures."
     exit 1

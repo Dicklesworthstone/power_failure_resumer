@@ -3,8 +3,7 @@
 # /data/projects, /dp) next, everything else after.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-SD="$(mktemp -d "${TMPDIR:-/tmp}/pfr-ord.XXXXXX")"
-trap 'rm -rf "$SD"' EXIT
+SD="$(new_state_dir pfr-tab-order)"
 
 # Private fixture set: one hub session (/data/projects) and one normal (/tmp),
 # both in the same pre-boot pocket; hub is OLDER so plain newest-first order
@@ -26,7 +25,7 @@ PY
 
 out="$(PFR_STATUS_TAB=1 PFR_AM=1 PFR_AM_BIN=sh "$PFR" --dry-run \
         --codex-root "$FR/codex" --claude-root "$FR/claude-none" \
-        --fake-boot "$FAKE_BOOT" --lookback-hours 8760000 --state-dir "$SD" 2>&1)" \
+        --fake-boot "$FAKE_BOOT" --lookback-hours 8760000 --state-dir "$SD" --no-save-plan 2>&1)" \
   || fail "dry-run failed: $out"
 
 plan_lines="$(grep -E '^  DRY  ' <<<"$out")"
@@ -43,7 +42,7 @@ assert_contains "$line4" "00000000d002" "normal session fourth"
 # With PFR_AM=0 no am line appears
 out="$(PFR_AM=0 "$PFR" --dry-run \
         --codex-root "$FR/codex" --claude-root "$FR/claude-none" \
-        --fake-boot "$FAKE_BOOT" --lookback-hours 8760000 --state-dir "$SD" 2>&1)" \
+        --fake-boot "$FAKE_BOOT" --lookback-hours 8760000 --state-dir "$SD" --no-save-plan 2>&1)" \
   || fail "PFR_AM=0 dry-run failed"
 assert_not_contains "$(grep -E '^  DRY  ' <<<"$out" | sed -n '1p')" "&& sh" "no am tab when disabled"
 

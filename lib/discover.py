@@ -50,6 +50,7 @@ class Session:
     is_subagent: bool
     started_hint: str = ""
     is_running: bool = False
+    preview: str = ""
 
 
 def eprint(*args: object) -> None:
@@ -180,6 +181,108 @@ def scan_jsonl_for_cwd(path: Path, max_lines: int = 80) -> Optional[str]:
     return None
 
 
+def _first_text_block(content: object) -> str:
+    """First non-empty text from a message content value (str or block list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text
+    return ""
+
+
+def _clean_snippet(text: str, limit: int = 160) -> str:
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return text
+
+
+_BOILERPLATE_PREFIXES = (
+    "# AGENTS.md", "<INSTRUCTIONS", "<environment_context", "<system-reminder",
+    "<local-command", "<command-name", "Caveat:",
+)
+
+
+def _is_boilerplate(text: str) -> bool:
+    stripped = text.lstrip()
+    return any(stripped.startswith(p) for p in _BOILERPLATE_PREFIXES)
+
+
+def extract_claude_identity(path: Path, max_lines: int = 200) -> Tuple[str, str]:
+    """Return (title, preview) for a Claude session file.
+
+    Title priority (casr-verified): custom-title > ai-title > summary >
+    first real user message. Preview is always the first real user message.
+    """
+    custom = ai = summary = first_user = ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                typ = obj.get("type")
+                if typ == "custom-title" and not custom:
+                    custom = str(obj.get("customTitle") or obj.get("title") or "")
+                elif typ == "ai-title" and not ai:
+                    ai = str(obj.get("aiTitle") or "")
+                elif typ == "summary" and not summary:
+                    summary = str(obj.get("summary") or "")
+                elif typ == "user" and not first_user:
+                    msg = obj.get("message")
+                    if isinstance(msg, dict) and msg.get("role") == "user":
+                        text = _first_text_block(msg.get("content"))
+                        if text.strip() and not _is_boilerplate(text):
+                            first_user = text
+                if custom and first_user:
+                    break
+    except OSError:
+        pass
+    title = _clean_snippet(custom or ai or summary or first_user, 80)
+    return title, _clean_snippet(first_user)
+
+
+def extract_codex_first_user(path: Path, max_lines: int = 200) -> str:
+    """First real user message text from a codex rollout (skips AGENTS.md etc.)."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                payload = obj.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                text = ""
+                if (obj.get("type") == "response_item"
+                        and payload.get("type") == "message"
+                        and payload.get("role") == "user"):
+                    text = _first_text_block(payload.get("content"))
+                elif (obj.get("type") == "event_msg"
+                        and payload.get("type") == "user_message"):
+                    raw = payload.get("message")
+                    text = raw if isinstance(raw, str) else _first_text_block(raw)
+                if text.strip() and not _is_boilerplate(text):
+                    return _clean_snippet(text)
+    except OSError:
+        pass
+    return ""
+
+
 def extract_uuid_from_name(name: str) -> Optional[str]:
     m = UUID_RE.search(name)
     return m.group(0) if m else None
@@ -251,6 +354,7 @@ def discover_codex(sessions_root: Path, since_mtime: float) -> List[Session]:
             title_bits.append(str(payload["agent_nickname"]))
         title_bits.append(Path(cwd).name or cwd)
         title = " · ".join(title_bits)
+        preview = extract_codex_first_user(path)
 
         out.append(
             Session(
@@ -263,6 +367,7 @@ def discover_codex(sessions_root: Path, since_mtime: float) -> List[Session]:
                 resume_cmd=f"cod resume {resume_id}",
                 is_subagent=sub,
                 started_hint=str(payload.get("timestamp") or ""),
+                preview=preview,
             )
         )
     return out
@@ -311,6 +416,7 @@ def discover_claude(projects_root: Path, since_mtime: float) -> List[Session]:
                 else:
                     cwd = str(Path.home() / "projects")
 
+            title, preview = extract_claude_identity(path)
             out.append(
                 Session(
                     provider="claude",
@@ -318,9 +424,10 @@ def discover_claude(projects_root: Path, since_mtime: float) -> List[Session]:
                     cwd=cwd,
                     mtime=st.st_mtime,
                     path=str(path),
-                    title=Path(cwd).name or cwd,
+                    title=title or Path(cwd).name or cwd,
                     resume_cmd=f"cc --resume {sid}",
                     is_subagent=False,
+                    preview=preview,
                 )
             )
     return out

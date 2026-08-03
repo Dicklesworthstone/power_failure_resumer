@@ -2,8 +2,7 @@
 # Doctor: healthy env exits 0; simulated missing Ghostty fails; --json parses.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-SD="$(mktemp -d "${TMPDIR:-/tmp}/pfr-doc.XXXXXX")"
-trap 'rm -rf "$SD"' EXIT
+SD="$(new_state_dir pfr-doctor)"
 
 out="$("$PFR" --doctor --state-dir "$SD" 2>&1)" || fail "doctor should be healthy here: $out"
 assert_contains "$out" "doctor: healthy" "healthy summary"

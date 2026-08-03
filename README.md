@@ -1,14 +1,33 @@
 # power_failure_resumer
 
+When this Mac hard-powers off mid-swarm, Ghostty dies and every local `cod` / `cc` agent goes with it. Session files on disk often share nearly the same mtime just before reboot. This tool finds that simultaneous-stop cluster and reopens each session in its own Ghostty tab.
+
 ## Install
+
+One-liner (from GitHub `main`):
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/power_failure_resumer/main/install.sh?$(date +%s)" | bash
 ```
 
-Adds `pfr` to `~/.local/bin` (pass `-s -- --easy-mode` to also wire up your PATH). Then: `pfr --doctor`, `pfr --dry-run`, `pfr -y`.
+Puts `pfr` on `~/.local/bin`. Useful installer flags (after `bash -s --`):
 
-When this Mac hard-powers off mid-swarm, Ghostty dies and every local `cod` / `cc` agent goes with it. Session files on disk often share nearly the same mtime just before reboot. This tool finds that simultaneous-stop cluster and reopens each session in its own Ghostty tab.
+| Flag | Purpose |
+|------|---------|
+| `--easy-mode` | Also add `~/.local/bin` to PATH in shell rc files |
+| `--prefix DIR` | Install root (default `~/.local/share/pfr`) |
+| `--bin-dir DIR` | Symlink dir for `pfr` (default `~/.local/bin`) |
+| `--ref REF` | Git ref/branch/tag (default `main`) |
+| `--offline TARBALL` | Install from a local tarball |
+| `--force` | Reinstall even if the same version is present |
+| `--verify` | Run `pfr --doctor` after install |
+| `--quiet` / `--no-gum` | Quieter or plain ANSI output |
+
+From a local checkout:
+
+```bash
+ln -sf ~/projects/power_failure_resumer/power_failure_resumer.sh ~/.local/bin/pfr
+```
 
 ## What it does
 
@@ -24,32 +43,25 @@ When this Mac hard-powers off mid-swarm, Ghostty dies and every local `cod` / `c
 ## Quick start
 
 ```bash
-cd ~/projects/power_failure_resumer
-
 # After a blackout: inspect first
-./power_failure_resumer.sh --dry-run
+pfr --dry-run
 
 # Open the crash cluster
-./power_failure_resumer.sh -y
+pfr -y
 
 # Or open from the plan you just saved
-./power_failure_resumer.sh --last-plan -y
+pfr --last-plan -y
 
 # Environment health
-./power_failure_resumer.sh --doctor
-./power_failure_resumer.sh --doctor --json
+pfr --doctor
+pfr --doctor --json
 ```
 
-Optional install:
+From a checkout without installing:
 
 ```bash
-ln -sf ~/projects/power_failure_resumer/power_failure_resumer.sh ~/.local/bin/pfr
-pfr --dry-run
-```
-
-Tests:
-
-```bash
+cd ~/projects/power_failure_resumer
+./power_failure_resumer.sh --dry-run
 ./scripts/run_tests.sh
 ```
 
@@ -58,7 +70,7 @@ Tests:
 ```
 blackout → boot → pfr --dry-run  → review list + confidence
                  → pfr -y          → open + verify
-                 → pfr --last-plan → reopen same set later without rediscover
+                 → pfr --last-plan → same set later without rediscover
 ```
 
 Dry-run prints where the plan was saved and suggests:
@@ -133,6 +145,7 @@ next: pfr --last-plan -y   or   pfr --last-plan --pick
 | `PFR_WINDOW`, `PFR_LOOKBACK_HOURS`, `PFR_PRE_BOOT_LOOKBACK`, `PFR_PROVIDERS` | Discovery defaults |
 | `PFR_OPEN_MODE`, `PFR_DRIVER`, `PFR_DELAY`, `PFR_SETTLE`, `PFR_MAX_OPEN` | Launch defaults |
 | `PFR_STATE_DIR` / `XDG_STATE_HOME` | Plan/report location |
+| `PFR_CODEX_ROOT`, `PFR_CLAUDE_ROOT`, `PFR_PS_FILE` | Same as the isolation flags |
 | `PFR_FAKE_BOOT` | Test boot override |
 | `PFR_VERIFY=0` | Skip post-open verification |
 | `PFR_VERIFY_TIMEOUT` | Verify poll seconds (default 15) |
@@ -148,7 +161,7 @@ On a hard power cut, processes mid-write tend to stop updating files at about th
 1. Collect top-level sessions modified in the last `--lookback-hours`.
 2. Drop Codex subagent threads unless `--include-subagents`.
 3. Dedupe by `(provider, session_id)`, keep newest file.
-4. Mark live resumes from `ps` (UUID right after a `resume` flag). **Cluster first**, then drop live ones so the crash pocket does not shift.
+4. Mark live resumes from `ps` (UUID right after a `resume` flag). Cluster first, then drop live ones so the crash pocket does not shift.
 5. **auto mode:** sessions in `[boot - lookback, boot + slack]`, then densest pocket of size `--window`. If that set is empty, global densest window.
 
 Confidence is scored on the full pocket (including already-running members). Density-only mode never gets `high`. See `lib/confidence.py`.
@@ -163,6 +176,8 @@ cod resume 019fa4a7-3665-7aa3-8633-2a47c42c1d78
 
 cc --resume ba9de0d5-51bb-40f8-9029-8ea3bcfc3481
 ```
+
+The script types those into a real interactive shell so your `cod` / `cc` aliases apply.
 
 ## Ghostty open drivers
 
@@ -210,13 +225,16 @@ Plan load refuses a different boot time or plans older than 24h unless `--force-
 ./scripts/run_tests.sh
 ```
 
-Regenerates fixtures, runs `tests/test_*.sh` / `tests/test_*.py` and e2e scripts, writes NDJSON under `tests/logs/`. Offline: uses fixture roots, `--fake-boot`, and canned `--ps-file` data. No live Ghostty required for the default suite.
+Regenerates fixtures, runs `tests/test_*.sh` / `tests/test_*.py` and e2e scripts, writes NDJSON under `tests/logs/`. Offline suite uses fixture roots, `--fake-boot`, and canned `--ps-file` data. No live Ghostty required for the default run.
+
+Current suite includes smoke, cluster, plan, doctor, tab order, verify, and e2e dry/plan/skip scripts.
 
 ## Layout
 
 ```
 power_failure_resumer/
 ├── power_failure_resumer.sh
+├── install.sh
 ├── lib/
 │   ├── discover.py
 │   ├── confidence.py
@@ -227,6 +245,7 @@ power_failure_resumer/
 ├── scripts/run_tests.sh
 ├── tests/
 ├── docs/session-formats.md
+├── AGENTS.md
 └── README.md
 ```
 
@@ -243,7 +262,7 @@ power_failure_resumer/
 | Symptom | Fix |
 |---------|-----|
 | Empty cluster | `--mode recent --lookback-hours 6 --window 3600`, or widen `--pre-boot-lookback` |
-| All sessions “already live” | Expected if you already resumed them; `--force-reopen` to open again |
+| All sessions already live | Expected if you already resumed them; `--force-reopen` to open again |
 | Too many sessions | `--projects-only`, `--providers codex`, or `--pick` |
 | LOW confidence | Review carefully; density pocket may not be a crash |
 | UI keystrokes go nowhere | Accessibility; do not type mid-run; larger `--settle` / `--delay` |

@@ -14,6 +14,10 @@ FIX_ARGS=(--codex-root "$FIX/codex" --claude-root "$FIX/claude"
 # Deterministic runs: no agent-mail or status tab unless a test opts in.
 export PFR_AM=0
 export PFR_STATUS_TAB=0
+export PFR_KEEP_TEMPS=1
+PFR_TEST_TMP="$PFR_ROOT/tests/logs/tmp/run-$(date +%Y%m%d_%H%M%S)-$$-${RANDOM}"
+mkdir -p "$PFR_TEST_TMP"
+export TMPDIR="$PFR_TEST_TMP"
 
 fail() { echo "ASSERT FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "${3:-}: expected '$2', got '$1'"; }

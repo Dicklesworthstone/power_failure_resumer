@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import sys
 import time
 from datetime import datetime
@@ -23,20 +25,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from discover import running_session_ids  # noqa: E402
+from discover import UUID_RE, running_session_ids  # noqa: E402
 from plan import atomic_write_json, default_state_dir  # noqa: E402
 
 
 def read_attempts(stream) -> list:
     attempts = []
-    for line in stream:
+    for line_number, line in enumerate(stream, start=1):
         line = line.rstrip("\n")
         if not line.strip():
             continue
         parts = line.split("\t")
-        if len(parts) < 4:
-            continue
+        if len(parts) != 4:
+            raise ValueError(f"attempt line {line_number}: expected exactly 4 TSV fields")
         provider, sid, cwd, ok = parts[0], parts[1], parts[2], parts[3]
+        if provider not in ("codex", "claude"):
+            raise ValueError(f"attempt line {line_number}: invalid provider {provider!r}")
+        if not UUID_RE.fullmatch(sid):
+            raise ValueError(f"attempt line {line_number}: invalid session UUID {sid!r}")
+        if not Path(cwd).is_absolute():
+            raise ValueError(f"attempt line {line_number}: cwd must be absolute")
+        if ok not in ("0", "1"):
+            raise ValueError(f"attempt line {line_number}: open_ok must be 0 or 1")
         attempts.append({
             "provider": provider,
             "session_id": sid,
@@ -57,13 +67,26 @@ def main(argv=None) -> int:
     ap.add_argument("--open-mode", default="")
     args = ap.parse_args(argv)
 
-    attempts = read_attempts(sys.stdin)
+    if not math.isfinite(args.timeout) or args.timeout < 0:
+        ap.error("--timeout must be a finite non-negative number")
+    if not math.isfinite(args.interval) or args.interval <= 0:
+        ap.error("--interval must be a finite positive number")
+
+    try:
+        attempts = read_attempts(sys.stdin)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     to_verify = [a for a in attempts if a["open_ok"]]
 
     deadline = time.monotonic() + max(args.timeout, 0.0)
     while True:
         if args.ps_file:
-            ps_text = Path(args.ps_file).read_text(encoding="utf-8", errors="replace")
+            try:
+                ps_text = Path(args.ps_file).read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                print(f"error: cannot read --ps-file: {exc}", file=sys.stderr)
+                return 2
             running = running_session_ids(ps_text)
         else:
             running = running_session_ids()
@@ -81,6 +104,8 @@ def main(argv=None) -> int:
     unverified = [a["session_id"] for a in attempts if a["open_ok"] and not a["verified"]]
 
     state_dir = Path(args.state_dir) if args.state_dir else default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(state_dir, 0o700)
     report = {
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "driver": args.driver,

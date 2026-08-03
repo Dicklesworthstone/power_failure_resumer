@@ -3,11 +3,12 @@
 # Emits NDJSON events to tests/logs/run-<stamp>.ndjson; per-test output under
 # tests/logs/out-<stamp>/. On failure, the last 50 output lines are dumped.
 set -uo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TESTS_DIR="$ROOT/tests"
 LOG_DIR="$TESTS_DIR/logs"
-STAMP="$(date +%Y%m%d_%H%M%S)"
+STAMP="$(date +%Y%m%d_%H%M%S)-$$"
 NDJSON="$LOG_DIR/run-${STAMP}.ndjson"
 OUT_DIR="$LOG_DIR/out-${STAMP}"
 mkdir -p "$OUT_DIR"

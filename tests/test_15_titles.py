@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Unit tests for title/preview extraction from session transcripts."""
+
+from __future__ import annotations
+
+import json
+import sys
+import unittest
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+from discover import extract_claude_identity, extract_codex_first_user  # noqa: E402
+
+WORK = ROOT / "tests" / "logs" / "state"
+
+
+def tmp_jsonl(label: str, lines: list) -> Path:
+    d = WORK / f"titles-{label}-{uuid.uuid4().hex}"
+    d.mkdir(parents=True)
+    p = d / "session.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    return p
+
+
+def user_line(text: str) -> dict:
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+class ClaudeTitleTest(unittest.TestCase):
+    def test_priority_custom_over_ai_over_summary_over_user(self):
+        p = tmp_jsonl("prio", [
+            user_line("first real question"),
+            {"type": "summary", "summary": "the summary"},
+            {"type": "ai-title", "aiTitle": "the ai title"},
+            {"type": "custom-title", "customTitle": "the custom title"},
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertEqual(title, "the custom title")
+        self.assertEqual(preview, "first real question")
+
+    def test_ai_title_used_when_no_custom(self):
+        p = tmp_jsonl("ai", [
+            {"type": "ai-title", "aiTitle": "Review project for bugs"},
+            user_line("look for bugs please"),
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertEqual(title, "Review project for bugs")
+        self.assertEqual(preview, "look for bugs please")
+
+    def test_falls_back_to_first_user_and_skips_boilerplate(self):
+        p = tmp_jsonl("fallback", [
+            user_line("<system-reminder>ignore me</system-reminder>"),
+            user_line("Caveat: local command noise"),
+            user_line("actual request here"),
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertEqual(title, "actual request here")
+        self.assertEqual(preview, "actual request here")
+
+    def test_content_block_list_and_truncation(self):
+        long_text = "x" * 500
+        p = tmp_jsonl("blocks", [
+            {"type": "user", "message": {"role": "user",
+             "content": [{"type": "text", "text": long_text}]}},
+        ])
+        title, preview = extract_claude_identity(p)
+        self.assertLessEqual(len(title), 80)
+        self.assertLessEqual(len(preview), 160)
+        self.assertTrue(preview.endswith("…"))
+
+    def test_unreadable_or_garbage_file(self):
+        p = tmp_jsonl("garbage", [])
+        p.write_text("not json\n{{{\n", encoding="utf-8")
+        self.assertEqual(extract_claude_identity(p), ("", ""))
+
+
+class CodexPreviewTest(unittest.TestCase):
+    def test_skips_agents_md_and_finds_real_message(self):
+        p = tmp_jsonl("codex", [
+            {"type": "session_meta", "payload": {"id": "x"}},
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text",
+                             "text": "# AGENTS.md instructions for /x\n<INSTRUCTIONS>"}]}},
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "fix the flaky test"}]}},
+        ])
+        self.assertEqual(extract_codex_first_user(p), "fix the flaky test")
+
+    def test_event_msg_user_message(self):
+        p = tmp_jsonl("evt", [
+            {"type": "event_msg", "payload": {"type": "user_message",
+                                              "message": "resume the run"}},
+        ])
+        self.assertEqual(extract_codex_first_user(p), "resume the run")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

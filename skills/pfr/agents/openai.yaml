@@ -1,0 +1,4 @@
+interface:
+  display_name: "PFR Session Recovery"
+  short_description: "Safely resume local agent sessions"
+  default_prompt: "Use $pfr to inspect and safely resume my local Codex and Claude sessions after a reboot."

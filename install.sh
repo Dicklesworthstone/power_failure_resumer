@@ -300,8 +300,23 @@ PY
   }
 }
 
+ensure_launcher() {
+  local link_path="$BIN_DIR/pfr" link_tmp="$BIN_DIR/.pfr-link.$$"
+  if [[ -L "$link_path" && "$(readlink "$link_path" 2>/dev/null || true)" == "$PREFIX/power_failure_resumer.sh" ]]; then
+    return 0
+  fi
+  # preflight already rejects unrelated entries. Recheck here to narrow the
+  # race between validation and activation.
+  if [[ -e "$link_path" || -L "$link_path" ]]; then
+    err "refusing to replace unrelated path: $link_path"
+    return 1
+  fi
+  ln -s "$PREFIX/power_failure_resumer.sh" "$link_tmp" || return 1
+  mv "$link_tmp" "$link_path"
+}
+
 install_tree() {
-  local backup="" link_path="$BIN_DIR/pfr" link_tmp="$BIN_DIR/.pfr-link.$$"
+  local backup=""
   STAGED_DIR="$(mktemp -d "${PREFIX}.staging.XXXXXX")"
   cp -R "$SRC_DIR/power_failure_resumer.sh" "$SRC_DIR/lib" "$STAGED_DIR/"
   [[ -d "$SRC_DIR/docs" ]] && cp -R "$SRC_DIR/docs" "$STAGED_DIR/"
@@ -319,9 +334,7 @@ install_tree() {
     exit 1
   fi
   STAGED_DIR=""
-  if ! ln -s "$PREFIX/power_failure_resumer.sh" "$link_tmp" ||
-     ! mv -f "$link_tmp" "$link_path"; then
-    [[ -L "$link_tmp" ]] && rm -f "$link_tmp"
+  if ! ensure_launcher; then
     rm -rf "$PREFIX"
     [[ -n "$backup" && -d "$backup" ]] && mv "$backup" "$PREFIX"
     err "failed to install launcher; previous tree restored"
@@ -423,6 +436,7 @@ main() {
     local incoming
     incoming="$(tree_version "$SRC_DIR")"
     if [[ "$incoming" == "$before" ]]; then
+      ensure_launcher || { err "failed to install launcher"; exit 1; }
       ok "already up to date (content $before) — use --force to reinstall"
       maybe_add_path
       summary

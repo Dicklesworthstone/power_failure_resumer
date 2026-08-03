@@ -10,7 +10,8 @@ TEST_HOME="$WORK/home"
 PREFIX="$TEST_HOME/share/pfr"
 BIN_ONE="$TEST_HOME/bin-one"
 BIN_TWO="$TEST_HOME/bin-two"
-mkdir -p "$PACKAGE" "$TEST_HOME" "$BIN_ONE" "$BIN_TWO"
+BIN_THREE="$TEST_HOME/bin-three"
+mkdir -p "$PACKAGE" "$TEST_HOME" "$BIN_ONE" "$BIN_TWO" "$BIN_THREE"
 cp -R "$PFR_ROOT/power_failure_resumer.sh" "$PFR_ROOT/lib" "$PACKAGE/"
 cp -R "$PFR_ROOT/docs" "$PACKAGE/"
 tar -czf "$WORK/pfr-one.tar.gz" -C "$ARCHIVE_ROOT" pfr-source
@@ -42,6 +43,15 @@ same_out="$(
     --prefix "$PREFIX" --bin-dir "$BIN_ONE" --no-gum 2>&1
 )" || fail "idempotent reinstall failed: $same_out"
 assert_contains "$same_out" "already up to date" "unchanged tree short-circuit"
+
+repair_out="$(
+  HOME="$TEST_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
+  PFR_INSTALL_LOCK_DIR="$WORK/lock-repair" \
+  bash "$PFR_ROOT/install.sh" --offline "$WORK/pfr-one.tar.gz" \
+    --prefix "$PREFIX" --bin-dir "$BIN_THREE" --no-gum 2>&1
+)" || fail "launcher repair failed: $repair_out"
+assert_contains "$repair_out" "already up to date" "repair kept no-op tree"
+[[ -L "$BIN_THREE/pfr" ]] || fail "unchanged install did not repair launcher"
 
 # Change only a library file. A CLI-only hash would miss this upgrade.
 ARCHIVE_ROOT_TWO="$WORK/archive-two"

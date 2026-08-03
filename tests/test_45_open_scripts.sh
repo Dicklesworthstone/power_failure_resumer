@@ -46,6 +46,11 @@ guarded = source[start:end]
 for key in ('keystroke "n" using command down', 'keystroke "t" using command down'):
     assert source.count(key) == 1, f"expected exactly one {key!r}"
     assert key in guarded, f"{key!r} is not protected by createdSurface=false"
+fallback = source[start:source.index('keystroke "u" using control down', start)]
+assert 'my waitForShellPrompt(missing value, settleSecs)' not in fallback, (
+    "fallback must not probe an unbound front window after Cmd+T/Cmd+N"
+)
+assert 'delay settleSecs' in fallback, "fallback must retain its fixed post-open settle"
 PY
 
 # The UI fallback can replace the clipboard only if it preserves and restores

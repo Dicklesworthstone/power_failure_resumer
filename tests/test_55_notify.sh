@@ -46,4 +46,22 @@ assert_eq "$out" "" "--notify -y must stay quiet and never open"
 assert_eq "$(wc -l < "$NOTIFY_LOG" | tr -d '[:space:]')" "6" \
   "notify with -y must only send the notification"
 
+# --notify exits before all Ghostty launch settings, status-tab, and agent-mail
+# paths. Simulate Linux so a stale macOS driver would fail if it were consulted.
+FAKE_BIN="$SD/fake-bin"
+mkdir -p "$FAKE_BIN"
+printf '%s\n' '#!/usr/bin/env bash' \
+  '[[ "${1:-}" == "-s" ]] && { printf "Linux\\n"; exit 0; }' \
+  'exec /usr/bin/uname "$@"' > "$FAKE_BIN/uname"
+chmod 700 "$FAKE_BIN/uname"
+out="$(PATH="$FAKE_BIN:$PATH" PFR_DRIVER=ui PFR_OPEN_MODE=invalid \
+  PFR_SETTLE=invalid PFR_DELAY=invalid PFR_MAX=invalid \
+  PFR_STATUS_TAB=1 PFR_AM=1 PFR_AM_BIN=definitely-not-am \
+  PFR_NOTIFY_LOG="$NOTIFY_LOG" PFR_NOTIFY_CMD="$NOTIFY_CMD" "$PFR" --notify \
+  "${FIX_ARGS[@]}" --ps-file "$FIX/ps.txt" --state-dir "$SD" 2>&1)" \
+  || fail "notify must not evaluate launch settings: $out"
+assert_eq "$out" "" "notify ignores launch-only configuration"
+assert_eq "$(wc -l < "$NOTIFY_LOG" | tr -d '[:space:]')" "8" \
+  "notify sent once without opening status or agent-mail tabs"
+
 echo "notify OK"

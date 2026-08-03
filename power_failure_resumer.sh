@@ -355,28 +355,33 @@ if (( NOTIFY && NO_SAVE_PLAN )); then
   die "--notify requires last-plan persistence; do not combine it with --no-save-plan"
 fi
 
-# Default driver per platform; validate driver ↔ platform pairing.
-if [[ -z "$DRIVER" ]]; then
-  if [[ "$PLATFORM" == "Darwin" ]]; then DRIVER="ui"; else DRIVER="ghostty"; fi
-fi
-case "$DRIVER" in
-  ui|api)
-    if [[ "$PLATFORM" != "Darwin" ]]; then
-      die "driver '$DRIVER' needs macOS AppleScript; on Linux use --driver ghostty"
-    fi
-    ;;
-  ghostty) ;;
-  *) die "invalid --driver '$DRIVER' (use ui, api, or ghostty)" ;;
-esac
-if [[ "$DRIVER" == "ghostty" && "$OPEN_MODE" == "tab" ]]; then
-  # The ghostty CLI cannot address an existing window's tabs.
-  OPEN_MODE="window"
-fi
+# --notify stops after discovery and optional notification. It must not depend
+# on a launch driver or tab/window settings, including stale PFR_* values from
+# an interactive recovery configuration.
+if (( ! NOTIFY )); then
+  # Default driver per platform; validate driver ↔ platform pairing.
+  if [[ -z "$DRIVER" ]]; then
+    if [[ "$PLATFORM" == "Darwin" ]]; then DRIVER="ui"; else DRIVER="ghostty"; fi
+  fi
+  case "$DRIVER" in
+    ui|api)
+      if [[ "$PLATFORM" != "Darwin" ]]; then
+        die "driver '$DRIVER' needs macOS AppleScript; on Linux use --driver ghostty"
+      fi
+      ;;
+    ghostty) ;;
+    *) die "invalid --driver '$DRIVER' (use ui, api, or ghostty)" ;;
+  esac
+  if [[ "$DRIVER" == "ghostty" && "$OPEN_MODE" == "tab" ]]; then
+    # The ghostty CLI cannot address an existing window's tabs.
+    OPEN_MODE="window"
+  fi
 
-case "$OPEN_MODE" in
-  tab|window) ;;
-  *) die "invalid open mode '$OPEN_MODE' (use --tabs or --windows)" ;;
-esac
+  case "$OPEN_MODE" in
+    tab|window) ;;
+    *) die "invalid open mode '$OPEN_MODE' (use --tabs or --windows)" ;;
+  esac
+fi
 
 # ── doctor ──────────────────────────────────────────────────────────────────
 # Environment health checks. PFR_DOCTOR_SIM_MISSING="ghostty,osascript" lets
@@ -543,19 +548,21 @@ esac
 require_number "--window/PFR_WINDOW" "$WINDOW_SECONDS"
 require_number "--lookback-hours" "$LOOKBACK_HOURS"
 require_number "--pre-boot-lookback" "$PRE_BOOT_LOOKBACK"
-require_number "--settle" "$SETTLE_SECONDS"
 require_uint "--limit" "$LIMIT"
-require_uint "--max" "$MAX_OPEN"
+if (( ! NOTIFY )); then
+  require_number "--settle" "$SETTLE_SECONDS"
+  require_uint "--max" "$MAX_OPEN"
 
-# Per-driver default inter-session delay if user did not set one
-if [[ -z "$DELAY_SECONDS" ]]; then
-  if [[ "$DRIVER" == "ui" ]]; then
-    DELAY_SECONDS="0.80"
-  else
-    DELAY_SECONDS="0.35"
+  # Per-driver default inter-session delay if user did not set one
+  if [[ -z "$DELAY_SECONDS" ]]; then
+    if [[ "$DRIVER" == "ui" ]]; then
+      DELAY_SECONDS="0.80"
+    else
+      DELAY_SECONDS="0.35"
+    fi
   fi
+  require_number "--delay" "$DELAY_SECONDS"
 fi
-require_number "--delay" "$DELAY_SECONDS"
 
 need_cmd python3
 [[ -f "$DISCOVER_PY" ]] || die "missing $DISCOVER_PY"

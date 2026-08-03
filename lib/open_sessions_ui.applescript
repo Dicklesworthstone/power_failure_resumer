@@ -214,7 +214,10 @@ on run argv
 				else
 					keystroke "t" using command down
 				end if
-				my waitForShellPrompt(missing value, settleSecs)
+				-- The fallback has no stable terminal reference for the new tab/window.
+				-- Keep the fixed delay here: probing window 1 could see the old surface's
+				-- prompt before the Cmd+T/Cmd+N focus transition completes.
+				delay settleSecs
 				else
 					delay 0.15
 				end if

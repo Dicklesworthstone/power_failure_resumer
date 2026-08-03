@@ -435,7 +435,9 @@ maybe_install_skill() {
   [[ -t 0 || -t 1 || -t 2 ]] || return 0
   [[ -r /dev/tty && -w /dev/tty ]] || return 0
   local reply=""
-  printf 'Install the pfr agent skill for Claude Code / Codex (~/.claude/skills, ~/.codex/skills)? [y/N] ' > /dev/tty
+  if ! printf 'Install the pfr agent skill for Claude Code / Codex (~/.claude/skills, ~/.codex/skills)? [y/N] ' > /dev/tty; then
+    return 0
+  fi
   if ! read -r reply < /dev/tty; then
     reply=""
   fi

@@ -10,7 +10,16 @@
 #
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The installed launcher is a symlink (~/.local/bin/pfr -> <prefix>/power_failure_resumer.sh),
+# so walk the symlink chain before taking dirname or lib/ resolves next to the
+# link instead of the real script. macOS readlink has no -f; resolve by hand.
+PFR_SELF="${BASH_SOURCE[0]}"
+while [[ -h "$PFR_SELF" ]]; do
+  PFR_SELF_DIR="$(cd "$(dirname "$PFR_SELF")" && pwd)"
+  PFR_SELF="$(readlink "$PFR_SELF")"
+  [[ "$PFR_SELF" == /* ]] || PFR_SELF="${PFR_SELF_DIR}/${PFR_SELF}"
+done
+ROOT="$(cd "$(dirname "$PFR_SELF")" && pwd)"
 DISCOVER_PY="${ROOT}/lib/discover.py"
 OPEN_API_AS="${ROOT}/lib/open_sessions.applescript"
 OPEN_UI_AS="${ROOT}/lib/open_sessions_ui.applescript"

@@ -31,4 +31,20 @@ dur=$(( $(date +%s) - start_ts ))
 [[ "$dur" -lt 25 ]] || fail "doctor blocked on a hung login shell (${dur}s)"
 assert_contains "$out" "timed out" "bounded login-shell probe"
 
+# Regression (pfr-s9e): the installed launcher is a symlink in another
+# directory; ROOT must resolve to the real script's directory so lib/ is found.
+LAUNCHER_DIR="$SD/bin"
+mkdir -p "$LAUNCHER_DIR"
+ln -s "$PFR" "$LAUNCHER_DIR/pfr"
+out="$("$LAUNCHER_DIR/pfr" --doctor --state-dir "$SD" 2>&1)" \
+  || fail "doctor via symlinked launcher should be healthy: $out"
+assert_contains "$out" "doctor: healthy" "healthy via symlinked launcher"
+
+# Relative symlink chain (link -> link -> script) must also resolve.
+ln -s "pfr" "$LAUNCHER_DIR/pfr2"
+out="$("$LAUNCHER_DIR/pfr2" --dry-run "${FIX_ARGS[@]}" --state-dir "$SD" --json 2>/dev/null)" \
+  || fail "dry-run via chained relative symlink failed"
+printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' \
+  || fail "dry-run --json via symlink did not emit valid JSON"
+
 echo "doctor OK"

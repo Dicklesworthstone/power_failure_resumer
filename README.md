@@ -42,7 +42,7 @@ A power cut leaves a forensic signature: every process that was mid-write stops 
 | Tab order | Live status-log tab, agent-mail tab, hub projects, then the rest |
 | Titles + previews | Each session shows its title and first user message, so you know what you're resuming |
 | Doctor | `pfr --doctor` catches missing permissions and dependencies before they waste a recovery |
-| Offline tests | 10 suites against generated fixtures; no Ghostty, network, or live agents needed |
+| Offline tests | 11 suites against generated fixtures; no Ghostty, network, or live agents needed |
 
 ## Quick example
 
@@ -173,7 +173,7 @@ From a checkout without installing: `./power_failure_resumer.sh …` and `./scri
 |------|---------|
 | `--dry-run` / `-n` | List only |
 | `-y` / `--yes` | Open all matches |
-| `--pick` | Multi-select (fzf if present) |
+| `--pick` | Multi-select (fzf when present, numeric prompt otherwise) |
 | `--tabs` / `--windows` | Surface mode |
 | `--driver ui\|api\|ghostty` | macOS default `ui`; Linux default `ghostty` |
 | `--ui` / `--api` | Driver shortcuts |
@@ -286,7 +286,7 @@ Plan load refuses a plan from a different boot, older than 24h, or timestamped m
 
 ### Doctor
 
-`pfr --doctor` checks python3, core libs, writable state dir, session roots, and the platform's Ghostty hooks (Ghostty.app, osascript, and an Automation probe on macOS; the `ghostty` CLI on Linux), plus optional extras (`fzf`, `am`). Exit 0 when healthy; `--json` for automation.
+`pfr --doctor` checks python3, core libs, writable state dir, session roots, and the platform's Ghostty hooks (Ghostty.app, osascript, and an Automation probe on macOS; the `ghostty` CLI on Linux). It also confirms the `cod` and `cc` commands resolve in a login zsh (the same kind of shell resume commands run in) and reports optional extras (`fzf`, `am`). Exit 0 when healthy; `--json` for automation.
 
 ## Testing
 
@@ -296,7 +296,7 @@ Plan load refuses a plan from a different boot, older than 24h, or timestamped m
 
 Regenerates mtime-bearing fixtures (git cannot store mtimes), then runs `tests/test_*.sh`, `tests/test_*.py`, and `tests/e2e_*.sh` in name order, writing NDJSON events and per-test output under `tests/logs/` (last 50 lines dumped on failure). The default run is fully offline against fixture roots, `--fake-boot`, and canned `--ps-file` tables: no live Ghostty, no network, no writes to real session dirs.
 
-Suites: smoke, clustering (densest-window ties, pre-boot outliers, dedupe, running-mark regression), titles/previews, plan + confidence rubric with a golden fixture, doctor contracts, tab order, verification, and e2e dry-run / plan-roundtrip / skip-running.
+Suites: smoke, clustering (densest-window ties, pre-boot outliers, dedupe, running-mark regression), titles/previews, plan + confidence rubric with a golden fixture, doctor contracts, tab order, verification, installer (offline archives, upgrade detection, collision refusal), and e2e dry-run / plan-roundtrip / skip-running.
 
 ## Layout
 

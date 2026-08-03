@@ -171,6 +171,34 @@ require_number() {
   fi
 }
 
+# Run a command with combined output on stdout, killing it after $1 seconds.
+# Returns the command's status, or 124 on timeout. Bash 3.2 compatible.
+run_bounded() {
+  local secs="$1"; shift
+  local out pid rc=0 waited=0 limit
+  limit=$((secs * 10))
+  out="$(tmpfile)"
+  ( exec "$@" > "$out" 2>&1 ) &
+  pid=$!
+  while [[ "$waited" -lt "$limit" ]]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 0.2
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rc=124
+  else
+    wait "$pid" 2>/dev/null && rc=0 || rc=$?
+  fi
+  cat "$out"
+  cleanup_files "$out"
+  return "$rc"
+}
+
 tmpfile() {
   # Portable: macOS `mktemp -t prefix` does NOT expand XXXXXX the way GNU does.
   mktemp "${TMPDIR:-/tmp}/pfr.XXXXXX"
@@ -428,11 +456,21 @@ doctor_run() {
   else
     add_check agent_mail warn "am not found — no agent-mail tab (optional)"
   fi
-  local agent_cmds
-  if agent_cmds="$(zsh -lic 'type cod; type cc' 2>&1)"; then
+  # Probe the user's login shell (the same kind resume tabs run in), with a
+  # hard time bound: a hung rc file must not hang the doctor.
+  local agent_cmds probe_shell probe_rc
+  probe_shell="${SHELL:-/bin/zsh}"
+  if [[ ! -x "$probe_shell" ]]; then
+    add_check agent_commands warn "login shell not executable ($probe_shell); cannot probe cod/cc"
+  elif agent_cmds="$(run_bounded 8 "$probe_shell" -lic 'type cod; type cc')"; then
     add_check agent_commands ok "$agent_cmds"
   else
-    add_check agent_commands warn "cod/cc not both resolvable in login zsh: $agent_cmds"
+    probe_rc=$?
+    if [[ "$probe_rc" -eq 124 ]]; then
+      add_check agent_commands warn "login-shell probe timed out after 8s (slow rc files?); check skipped"
+    else
+      add_check agent_commands warn "cod/cc not both resolvable in login shell ($probe_shell): $agent_cmds"
+    fi
   fi
 
   local fails=0 i

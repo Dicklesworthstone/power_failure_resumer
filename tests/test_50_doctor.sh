@@ -19,4 +19,16 @@ assert_eq "$healthy" "False" "healthy=false when ghostty simulated missing"
 n_checks="$(printf '%s' "$json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["checks"]))')"
 [[ "$n_checks" -ge 6 ]] || fail "expected >=6 checks, got $n_checks"
 
+# A hung login shell (slow/blocking rc files) must not hang the doctor: the
+# probe is time-bounded and downgrades to a warning.
+HANG="$SD/hang.sh"
+printf '#!/bin/sh\nsleep 60\n' > "$HANG"
+chmod +x "$HANG"
+start_ts="$(date +%s)"
+out="$(SHELL="$HANG" "$PFR" --doctor --state-dir "$SD" 2>&1)" \
+  || fail "doctor must stay healthy when the shell probe times out: $out"
+dur=$(( $(date +%s) - start_ts ))
+[[ "$dur" -lt 25 ]] || fail "doctor blocked on a hung login shell (${dur}s)"
+assert_contains "$out" "timed out" "bounded login-shell probe"
+
 echo "doctor OK"

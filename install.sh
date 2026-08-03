@@ -32,6 +32,7 @@ FORCE=0
 QUIET=0
 NO_GUM=0
 VERIFY=0
+INSTALL_SKILL=0
 OFFLINE=""
 
 usage() {
@@ -50,6 +51,8 @@ Options:
   --quiet            Print errors only
   --no-gum           Use plain ANSI output even if gum is installed
   --verify           Run pfr --doctor after installation
+  --install-skill    Also install the pfr agent skill into ~/.claude/skills
+                     and ~/.codex/skills for detected agents (default: no)
   -h, --help         Show this help
 EOF
 }
@@ -74,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --quiet) QUIET=1; shift ;;
     --no-gum) NO_GUM=1; shift ;;
     --verify) VERIFY=1; shift ;;
+    --install-skill) INSTALL_SKILL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -337,6 +341,7 @@ install_tree() {
   STAGED_DIR="$(mktemp -d "${PREFIX}.staging.XXXXXX")"
   cp -R "$SRC_DIR/power_failure_resumer.sh" "$SRC_DIR/lib" "$STAGED_DIR/"
   [[ -d "$SRC_DIR/docs" ]] && cp -R "$SRC_DIR/docs" "$STAGED_DIR/"
+  [[ -d "$SRC_DIR/skills" ]] && cp -R "$SRC_DIR/skills" "$STAGED_DIR/"
   printf '%s/%s\n' "$REPO_OWNER" "$REPO_NAME" > "$STAGED_DIR/.pfr-install"
   chmod 0755 "$STAGED_DIR/power_failure_resumer.sh"
   # Swap only after the complete tree is staged. Keep the previous tree until
@@ -388,7 +393,7 @@ def shipped(path: Path) -> bool:
 
 
 paths = [root / "power_failure_resumer.sh"]
-for dirname in ("lib", "docs"):
+for dirname in ("lib", "docs", "skills"):
     base = root / dirname
     if base.is_dir():
         paths.extend(p for p in base.rglob("*") if p.is_file() and shipped(p))
@@ -406,6 +411,33 @@ PY
 
 installed_version() {
   tree_version "$PREFIX"
+}
+
+# Opt-in only (--install-skill): copy the bundled pfr agent skill into each
+# detected agent's skills directory. Never touches agents that are not present
+# and never replaces a directory that is not a pfr skill.
+install_agent_skill() {
+  local src="$PREFIX/skills/pfr" base dest installed=0
+  if [[ ! -f "$src/SKILL.md" ]]; then
+    warn "this install has no bundled skill (skills/pfr missing); skipping"
+    return 0
+  fi
+  for base in "$HOME/.claude" "$HOME/.codex"; do
+    [[ -d "$base" ]] || continue
+    dest="$base/skills/pfr"
+    if [[ -e "$dest" && ! -f "$dest/SKILL.md" ]]; then
+      warn "refusing to replace unrelated path: $dest"
+      continue
+    fi
+    mkdir -p "$dest"
+    if cp -R "$src/." "$dest/"; then
+      ok "skill installed: $dest"
+      installed=1
+    else
+      warn "could not install skill to $dest"
+    fi
+  done
+  (( installed )) || warn "no agent skills dir found (~/.claude or ~/.codex)"
 }
 
 maybe_add_path() {
@@ -467,6 +499,9 @@ main() {
       ensure_launcher || { err "failed to install launcher"; exit 1; }
       ok "already up to date (content $before) — use --force to reinstall"
       maybe_add_path
+      if [[ "$INSTALL_SKILL" -eq 1 ]]; then
+        install_agent_skill
+      fi
       summary
       return 0
     fi
@@ -483,6 +518,9 @@ main() {
       err "post-install doctor failed"
       exit 1
     fi
+  fi
+  if [[ "$INSTALL_SKILL" -eq 1 ]]; then
+    install_agent_skill
   fi
   summary
 }

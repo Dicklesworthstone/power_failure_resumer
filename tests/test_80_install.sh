@@ -14,6 +14,7 @@ BIN_THREE="$TEST_HOME/bin-three"
 mkdir -p "$PACKAGE" "$TEST_HOME" "$BIN_ONE" "$BIN_TWO" "$BIN_THREE"
 cp -R "$PFR_ROOT/power_failure_resumer.sh" "$PFR_ROOT/lib" "$PACKAGE/"
 cp -R "$PFR_ROOT/docs" "$PACKAGE/"
+[[ -d "$PFR_ROOT/skills" ]] && cp -R "$PFR_ROOT/skills" "$PACKAGE/"
 tar -czf "$WORK/pfr-one.tar.gz" -C "$ARCHIVE_ROOT" pfr-source
 
 help_out="$(bash "$PFR_ROOT/install.sh" --help 2>&1)" || fail "installer --help failed"
@@ -43,6 +44,23 @@ same_out="$(
     --prefix "$PREFIX" --bin-dir "$BIN_ONE" --no-gum 2>&1
 )" || fail "idempotent reinstall failed: $same_out"
 assert_contains "$same_out" "already up to date" "unchanged tree short-circuit"
+
+# Agent skill: never installed by default; --install-skill copies it into
+# detected agent dirs only; unrelated destination paths are refused.
+if [[ -f "$PREFIX/skills/pfr/SKILL.md" ]]; then
+  mkdir -p "$TEST_HOME/.claude" "$TEST_HOME/.codex/skills/pfr"
+  printf 'not a skill\n' > "$TEST_HOME/.codex/skills/pfr/occupied.txt"
+  [[ ! -e "$TEST_HOME/.claude/skills/pfr" ]] || fail "skill installed without --install-skill"
+  skill_out="$(
+    HOME="$TEST_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \
+    PFR_INSTALL_LOCK_DIR="$WORK/lock-skill" \
+    bash "$PFR_ROOT/install.sh" --offline "$WORK/pfr-one.tar.gz" \
+      --prefix "$PREFIX" --bin-dir "$BIN_ONE" --no-gum --install-skill 2>&1
+  )" || fail "--install-skill run failed: $skill_out"
+  [[ -f "$TEST_HOME/.claude/skills/pfr/SKILL.md" ]] || fail "skill missing from ~/.claude"
+  assert_contains "$skill_out" "refusing to replace unrelated path" "unrelated skill dir refused"
+  assert_eq "$(<"$TEST_HOME/.codex/skills/pfr/occupied.txt")" "not a skill" "unrelated dir untouched"
+fi
 
 repair_out="$(
   HOME="$TEST_HOME" PFR_INSTALLER_KEEP_TEMPS=1 \

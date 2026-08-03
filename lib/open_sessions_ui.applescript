@@ -28,6 +28,69 @@ on shellQuote(p)
 	return "'" & s & "'"
 end shellQuote
 
+on trimTrailingWhitespace(valueText)
+	set trimmedText to valueText as text
+	repeat while (length of trimmedText) > 0
+		set finalChar to character -1 of trimmedText
+		if finalChar is not in {space, return, linefeed, tab} then exit repeat
+		if (length of trimmedText) = 1 then
+			set trimmedText to ""
+		else
+			set trimmedText to text 1 thru -2 of trimmedText
+		end if
+	end repeat
+	return trimmedText
+end trimTrailingWhitespace
+
+on terminalShowsPrompt(termObj)
+	-- Prefer Ghostty's scripting contents when available. The current Ghostty
+	-- dictionary may not expose it, so read the focused terminal's accessible
+	-- text area as an equivalent contents source before conceding the fallback.
+	try
+		tell application "Ghostty"
+			set screenText to contents of termObj as text
+		end tell
+	on error
+		try
+			tell application "System Events"
+				tell process "Ghostty"
+					set screenText to value of text area 1 of scroll area 1 of UI element 1 of UI element 1 of window 1 as text
+				end tell
+			end tell
+		on error
+			return missing value
+		end try
+	end try
+
+	set screenText to my trimTrailingWhitespace(screenText)
+	if (length of screenText) = 0 then return false
+	set finalChar to character -1 of screenText
+	return finalChar is in "$%#>❯❱➜"
+end terminalShowsPrompt
+
+on waitForShellPrompt(termObj, settleSecs)
+	-- Poll at roughly 150 ms for no more than 4× --settle. A readable terminal
+	-- without a recognized prompt simply uses the bounded timeout; an unreadable
+	-- terminal preserves the former fixed-settle behavior.
+	set settleMaxSecs to settleSecs * 4
+	if settleMaxSecs < 0 then set settleMaxSecs to 0
+	set elapsedSecs to 0
+	repeat while elapsedSecs < settleMaxSecs
+		set promptVisible to my terminalShowsPrompt(termObj)
+		if promptVisible is missing value then
+			delay settleSecs
+			return false
+		end if
+		if promptVisible then return true
+		set remainingSecs to settleMaxSecs - elapsedSecs
+		set pollSecs to 0.15
+		if remainingSecs < pollSecs then set pollSecs to remainingSecs
+		if pollSecs > 0 then delay pollSecs
+		set elapsedSecs to elapsedSecs + pollSecs
+	end repeat
+	return false
+end waitForShellPrompt
+
 on run argv
 	if (count of argv) < 2 then
 		error "usage: open_sessions_ui.applescript <cwd> <resume_cmd> [tab|window] [is_first 0|1] [settle_secs]"
@@ -69,7 +132,6 @@ on run argv
 			if openMode is "window" then
 				set newWindow to new window with configuration cfg
 				set createdSurface to true
-				delay settleSecs
 				try
 					set termObj to focused terminal of selected tab of newWindow
 				on error
@@ -85,7 +147,6 @@ on run argv
 					set newWindow to new window with configuration cfg
 					set createdSurface to true
 				end try
-				delay settleSecs
 				try
 					if newTab is not missing value then
 						set termObj to focused terminal of newTab
@@ -104,6 +165,10 @@ on run argv
 		end tell
 
 		if termObj is missing value then error "no terminal surface"
+		try
+			tell application "Ghostty" to focus termObj
+		end try
+		my waitForShellPrompt(termObj, settleSecs)
 
 		tell application "Ghostty"
 			-- Retry once: first attempt can race shell rc on a brand-new surface.
@@ -146,10 +211,10 @@ on run argv
 				if createdSurface is false then
 					if openMode is "window" then
 						keystroke "n" using command down
-					else
-						keystroke "t" using command down
-					end if
-					delay settleSecs
+				else
+					keystroke "t" using command down
+				end if
+				my waitForShellPrompt(missing value, settleSecs)
 				else
 					delay 0.15
 				end if

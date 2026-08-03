@@ -107,7 +107,9 @@ LAUNCH:
   --ui                  Shortcut for --driver ui
   --api                 Shortcut for --driver api
   --delay SECS          Pause between sessions (ui default 0.8, api default 0.35)
-  --settle SECS         Wait after new surface for shell (default: 0.55)
+  --settle SECS         Adaptive shell-ready poll cap is 4× this value; use this
+                        fixed wait when Ghostty terminal contents are unreadable
+                        (default: 0.55)
   --max N               Safety cap on opens (default: 40)
 
 ENVIRONMENT:

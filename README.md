@@ -42,7 +42,7 @@ A power cut leaves a forensic signature: every process that was mid-write stops 
 | Tab order | Live status-log tab, agent-mail tab, hub projects, then the rest |
 | Titles + previews | Each session shows its title and first user message, so you know what you're resuming |
 | Model-matched resume | Each session resumes with its recorded model and reasoning effort (`-m` / `--model` pinned), so Codex never warns about a model mismatch |
-| ntm-aware | Sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms are excluded by default (matched against ntm's send history); `--include-ntm` overrides |
+| ntm-aware | Sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms are excluded by default — attributed via ntm's send history, swarm manifests, checkpoint session bindings, plus a narrow addressed-as-a-pane phrasing check; `--include-ntm` overrides |
 | Fast bulk open | All tabs open in one scripting call, each running its resume command directly — no typing, no per-tab settle |
 | Doctor | `pfr --doctor` catches missing permissions and dependencies before they waste a recovery |
 | Offline tests | 15 suites against generated fixtures, including an install→run e2e through the real installer and launcher; no Ghostty, network, or live agents needed |

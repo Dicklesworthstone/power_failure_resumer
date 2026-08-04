@@ -18,7 +18,8 @@ import discover  # noqa: E402
 
 NTM_PROMPT = (
     "PANE 2 OWNERSHIP: exact axisymmetric geometry. Claim Bead fs-b8.2 with br "
-    "and read its full body before writing any code."
+    "and read its full body before writing any code. Coordinate with panes 3-5 "
+    "through agent mail and never touch files reserved by another pane."
 )
 HUMAN_PROMPT = (
     "First read ALL of the AGENTS.md file and README.md file super carefully "
@@ -142,6 +143,22 @@ def main() -> None:
     ids = {s["session_id"] for s in data["sessions"]}
     assert "019fc925-a15e-7961-9a9c-7e62ef6c0005" not in ids, "prefix variant must be excluded"
 
+    # Habitual-opener regression: users reuse the same short opening line in
+    # hand-typed sessions AND inside longer ntm prompts. A top-level session
+    # whose entire first message merely prefixes a recorded ntm prompt must
+    # NOT be excluded (the shared text is below the prefix-evidence bar).
+    history_habit = tmp / "history-habit.jsonl"
+    history_habit.write_text(json.dumps({
+        "prompt": HUMAN_PROMPT + " Then use your code investigation agent mode "
+        "to fully understand the architecture before touching anything.",
+    }) + "\n")
+    habit_uuid = "019fc925-a15e-7961-9a9c-7e62ef6c0008"
+    p = write_codex(codex_root, habit_uuid, HUMAN_PROMPT, "gpt-5.6-sol", "ultra")
+    os.utime(p, (now, now))
+    data = run_discovery(codex_root, claude_root, history_habit)
+    ids = {s["session_id"] for s in data["sessions"]}
+    assert habit_uuid in ids, "habitual opener prefixing an ntm prompt must NOT be excluded"
+
     # Manifest layer: a pane spawned with an explicit model in a project dir
     # attributes matching sessions even when no send is in the history (ntm
     # swarms can be driven by mechanisms that bypass history.jsonl).
@@ -190,6 +207,27 @@ def main() -> None:
     data = run_discovery(codex_root, claude_root, history)
     ids = {s["session_id"] for s in data["sessions"]}
     assert late_uuid not in ids, "ntm send as LAST user message must be excluded"
+
+    # Phrasing heuristic: a swarm that left no ntm record (no history entry,
+    # no manifest, no checkpoint) is still caught by unmistakable
+    # addressed-as-a-pane phrasing — while lowercase mentions of the ntm TOOL
+    # (working in its repo) never trigger it.
+    wave_uuid = "019fc925-a15e-7961-9a9c-7e62ef6c0009"
+    p = write_codex(codex_root, wave_uuid,
+                    "You are the Wave 1 independent reviewer in a six-pane NTM "
+                    "campaign. Work directly in this pane; do not spawn agents.",
+                    "gpt-5.6-terra", "high")
+    os.utime(p, (now, now))
+    tool_uuid = "019fc925-a15e-7961-9a9c-7e62ef6c000a"
+    p = write_codex(codex_root, tool_uuid,
+                    "Please fix the bug in ntm where robot sends are not "
+                    "recorded in history.jsonl and add a regression test.",
+                    "gpt-5.6-sol", "ultra")
+    os.utime(p, (now, now))
+    data = run_discovery(codex_root, claude_root, history)
+    ids = {s["session_id"] for s in data["sessions"]}
+    assert wave_uuid not in ids, "pane-addressed phrasing must be excluded"
+    assert tool_uuid in ids, "mentioning the ntm tool must NOT be excluded"
 
     print("ntm + model OK")
 

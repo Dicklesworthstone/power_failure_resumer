@@ -16,12 +16,13 @@ FIX_ARGS=(--codex-root "$FIX/codex" --claude-root "$FIX/claude"
 export PFR_AM=0
 export PFR_STATUS_TAB=0
 export PFR_KEEP_TEMPS=1
-# Never let the user's real ntm records influence fixture discovery.
-export PFR_NTM_HISTORY="${TMPDIR:-/tmp}/pfr-absent-ntm-history.jsonl"
-export PFR_NTM_DATA="${TMPDIR:-/tmp}/pfr-absent-ntm-data"
 PFR_TEST_TMP="$PFR_ROOT/tests/logs/tmp/run-$(date +%Y%m%d_%H%M%S)-$$-${RANDOM}"
 mkdir -p "$PFR_TEST_TMP"
 export TMPDIR="$PFR_TEST_TMP"
+# Never let the user's real ntm records influence fixture discovery: point
+# attribution at paths that cannot exist inside the fresh test tmp dir.
+export PFR_NTM_HISTORY="$PFR_TEST_TMP/absent-ntm-history.jsonl"
+export PFR_NTM_DATA="$PFR_TEST_TMP/absent-ntm-data"
 
 fail() { echo "ASSERT FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "${3:-}: expected '$2', got '$1'"; }

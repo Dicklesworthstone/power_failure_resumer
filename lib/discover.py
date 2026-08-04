@@ -8,8 +8,9 @@ Prints JSON to stdout:
   "anchor_mtime": <epoch>,
   "window_seconds": <float>,
   "skipped_running": <int>,
+  "skipped_ntm": <int>,
   "sessions": [ { provider, session_id, cwd, mtime, path, title, resume_cmd,
-                  is_subagent, is_running }, ... ]
+                  is_subagent, is_running, preview, model, effort, is_ntm }, ... ]
 }
 """
 
@@ -51,10 +52,12 @@ EFFORT_RE = re.compile(r"[a-z]{1,16}")
 DEFAULT_NTM_DATA = Path.home() / ".local" / "share" / "ntm"
 DEFAULT_NTM_HISTORY = DEFAULT_NTM_DATA / "history.jsonl"
 # Prompts shorter than this are too generic to attribute ("continue", "ok").
-NTM_MIN_PROMPT_CHARS = 12
-# Prefix matches (transcript truncation, appended boilerplate) need more text
-# before they count as evidence.
-NTM_MIN_PREFIX_CHARS = 48
+NTM_MIN_PROMPT_CHARS = 24
+# Prefix matches (appended wrappers, truncation) count only when the SHORTER
+# side is itself long. Users reuse habitual opening lines (~100 chars) in both
+# hand-typed sessions and ntm sends; a habitual opener that happens to prefix
+# a longer recorded swarm prompt must never taint a top-level session.
+NTM_MIN_PREFIX_CHARS = 120
 
 
 @dataclass
@@ -423,9 +426,10 @@ def extract_codex_model(path: Path) -> Tuple[str, str]:
     Codex warns when a session recorded with one model is resumed with
     another, so the resume command pins whatever the session last used.
     The newest turn_context wins: a session switched mid-way should resume
-    with its final model. Tail first; fall back to the head for short files.
+    with its final model. Tail first; head only when the tail has none.
     """
-    for lines in (reversed(_tail_lines(path)), iter(_head_lines(path, 200))):
+
+    def scan(lines) -> Tuple[str, str]:
         for line in lines:
             if '"turn_context"' not in line:
                 continue
@@ -440,7 +444,12 @@ def extract_codex_model(path: Path) -> Tuple[str, str]:
             effort = _validated_effort(payload.get("effort"))
             if model or effort:
                 return model, effort
-    return "", ""
+        return "", ""
+
+    model, effort = scan(reversed(_tail_lines(path)))
+    if model or effort:
+        return model, effort
+    return scan(_head_lines(path, 200))
 
 
 def extract_claude_model(path: Path) -> str:
@@ -480,6 +489,17 @@ class NtmMarkers:
 
 _NTM_TYPE_TO_PROVIDER = {"cod": "codex", "codex": "codex", "cc": "claude", "claude": "claude"}
 _NTM_MODEL_ARG_RE = re.compile(r"(?:^|\s)(?:-m|--model)[= ](\S+)")
+
+# Last-resort attribution for swarms that left no on-disk ntm record (observed
+# in the wild: panes driven outside `ntm send`, no manifest, empty state.db).
+# Only unmistakable addressed-as-a-pane phrasings qualify — a human session
+# that merely *mentions* the ntm tool (e.g. working in its repo) must not
+# match, so lowercase "ntm" prose never triggers these.
+_NTM_PHRASING_RES = (
+    re.compile(r"\bPANE\s+\d+\s+OWNERSHIP\b"),
+    re.compile(r"\bNTM\s+(?:campaign|swarm)\b"),
+    re.compile(r"\b(?:pane|panes)\s+\d+(?:-\d+)?\b.{0,80}\bNTM\b"),
+)
 
 
 def load_ntm_prompts(path: Path) -> set:
@@ -572,7 +592,14 @@ def is_ntm_session(
         return True
     if model and (provider, cwd, model) in markers.pane_specs:
         return True
-    return any(is_ntm_prompt(text, markers.prompts) for text in user_texts if text)
+    for text in user_texts:
+        if not text:
+            continue
+        if is_ntm_prompt(text, markers.prompts):
+            return True
+        if any(pattern.search(text) for pattern in _NTM_PHRASING_RES):
+            return True
+    return False
 
 
 def is_ntm_prompt(first_user: str, prompts: set) -> bool:

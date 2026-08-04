@@ -34,6 +34,19 @@ on shellQuote(p)
 	return "'" & s & "'"
 end shellQuote
 
+on oneLine(t)
+	-- Result lines map 1:1 to pairs; an error message containing newlines
+	-- would shift every later pair's result.
+	set s to t as text
+	set oldDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to {return, linefeed}
+	set parts to text items of s
+	set AppleScript's text item delimiters to " "
+	set s to parts as text
+	set AppleScript's text item delimiters to oldDelims
+	return s
+end oneLine
+
 on launchCommand(shellPath, payload)
 	-- Run the payload in an interactive login shell (aliases/functions from rc
 	-- files apply), then drop back to a fresh interactive shell so the tab
@@ -135,7 +148,7 @@ on run argv
 					set oldClip to the clipboard
 					set clipSaved to true
 				on error clipErr
-					set end of resultLines to "fail cannot preserve clipboard for UI fallback: " & clipErr
+					set end of resultLines to "fail cannot preserve clipboard for UI fallback: " & my oneLine(clipErr)
 				end try
 			end if
 			if clipSaved then
@@ -143,7 +156,7 @@ on run argv
 					my fallbackOneSurface(workDir, cmdText, openMode, settleSecs)
 					set end of resultLines to "ok fallback"
 				on error fallbackErr
-					set end of resultLines to "fail native: " & nativeErr & "; fallback: " & fallbackErr
+					set end of resultLines to "fail native: " & my oneLine(nativeErr) & "; fallback: " & my oneLine(fallbackErr)
 				end try
 			end if
 		end try

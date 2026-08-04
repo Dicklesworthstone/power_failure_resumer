@@ -1153,10 +1153,10 @@ flush_opens
 # Map batch results back: entries before the sessions are status/agent-mail.
 PRE_COUNT=$((STATUS_QUEUED + AM_QUEUED))
 if (( ! DRY_RUN )); then
-  if (( STATUS_QUEUED )) && [[ "${BATCH_RESULTS[0]}" == fail* ]]; then
+  if (( STATUS_QUEUED )) && [[ "${BATCH_RESULTS[0]}" != ok* ]]; then
     warn "failed to open status tab (${BATCH_RESULTS[0]#fail })"
   fi
-  if (( AM_QUEUED )) && [[ "${BATCH_RESULTS[$STATUS_QUEUED]}" == fail* ]]; then
+  if (( AM_QUEUED )) && [[ "${BATCH_RESULTS[$STATUS_QUEUED]}" != ok* ]]; then
     warn "failed to open agent-mail tab (${BATCH_RESULTS[$STATUS_QUEUED]#fail })"
   fi
 fi

@@ -29,6 +29,19 @@ on shellQuote(p)
 	return "'" & s & "'"
 end shellQuote
 
+on oneLine(t)
+	-- Result lines map 1:1 to pairs; an error message containing newlines
+	-- would shift every later pair's result.
+	set s to t as text
+	set oldDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to {return, linefeed}
+	set parts to text items of s
+	set AppleScript's text item delimiters to " "
+	set s to parts as text
+	set AppleScript's text item delimiters to oldDelims
+	return s
+end oneLine
+
 on launchCommand(shellPath, payload)
 	-- Run the payload in an interactive login shell (aliases/functions from rc
 	-- files apply), then drop back to a fresh interactive shell so the tab
@@ -87,7 +100,7 @@ on run argv
 			my openOneSurface(workDir, cmdText, openMode, shellPath)
 			set end of resultLines to "ok"
 		on error errText
-			set end of resultLines to "fail " & errText
+			set end of resultLines to "fail " & my oneLine(errText)
 		end try
 		set pairIndex to pairIndex + 2
 		if pairIndex < (count of argv) and delaySecs > 0 then delay delaySecs

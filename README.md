@@ -28,7 +28,7 @@ You run a fleet of local coding agents (Codex CLI and Claude Code) in Ghostty ta
 
 ### The Solution
 
-A power cut leaves a forensic signature: every process that was mid-write stops touching its session file at nearly the same wall-clock moment, just before the next boot time. `pfr` scans Codex and Claude Code session files, finds that simultaneous-death cluster, scores how likely it is to be a real crash, and reopens each victim in its own Ghostty tab. The resume command (`cd <cwd> && cod resume <id>`) is typed into a real interactive shell, so your aliases apply.
+A power cut leaves a forensic signature: every process that was mid-write stops touching its session file at nearly the same wall-clock moment, just before the next boot time. `pfr` scans Codex and Claude Code session files, finds that simultaneous-death cluster, scores how likely it is to be a real crash, and reopens each victim in its own Ghostty tab. Every tab launches its resume command (`cod resume <id> -m <recorded-model>`) directly in an interactive login shell, so your aliases apply and each session comes back on the model it was actually using.
 
 ### Why use pfr?
 
@@ -42,10 +42,10 @@ A power cut leaves a forensic signature: every process that was mid-write stops 
 | Tab order | Live status-log tab, agent-mail tab, hub projects, then the rest |
 | Titles + previews | Each session shows its title and first user message, so you know what you're resuming |
 | Model-matched resume | Each session resumes with its recorded model and reasoning effort (`-m` / `--model` pinned), so Codex never warns about a model mismatch |
-| ntm-aware | Sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms are excluded by default — attributed via ntm's send history, swarm manifests, checkpoint session bindings, plus a narrow addressed-as-a-pane phrasing check; `--include-ntm` overrides |
-| Fast bulk open | All tabs open in one scripting call, each running its resume command directly — no typing, no per-tab settle |
+| ntm-aware | Sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms are excluded by default, attributed via ntm's send history, swarm manifests, checkpoint session bindings, and a narrow addressed-as-a-pane phrasing check; `--include-ntm` overrides |
+| Fast bulk open | All tabs open in one scripting call, each running its resume command directly; no typing, no per-tab settle |
 | Doctor | `pfr --doctor` catches missing permissions and dependencies before they waste a recovery |
-| Offline tests | 15 suites against generated fixtures, including an install→run e2e through the real installer and launcher; no Ghostty, network, or live agents needed |
+| Offline tests | 16 suites against generated fixtures, including an install-then-run e2e through the real installer and launcher; no Ghostty, network, or live agents needed |
 
 ## Quick example
 
@@ -54,21 +54,23 @@ $ pfr --dry-run
 › boot time:     2026-08-03 16:22:58
 › cluster mode:  pre_boot
 › anchor mtime:  2026-08-03 16:22:49
-› matched:       16 session(s)  (from 30 recent candidates)
-› confidence:    high  (mode=pre_boot, cluster_size=16, anchor_gap_to_boot=8.9s, pre_boot_tight_pocket)
+› matched:       4 session(s)  (from 20 recent candidates)
+› confidence:    high  (mode=pre_boot, cluster_size=4, anchor_gap_to_boot=9.0s, pre_boot_tight_pocket)
+› skipped:       19 ntm-spawned session(s)  (--include-ntm to include)
 
 ──── sessions to resume ────
- 1. codex   16:22:49     ~/projects/frankensim
-      cod resume 019fc925-a15e-7961-9a9c-7e62ef6cea2f
- 2. claude  16:22:49     ~/projects/frankenterm
-      cc --resume ba9de0d5-51bb-40f8-9029-8ea3bcfc3481
+ 1. codex   16:22:49     ~/projects/frankenterm
+      cod resume 019fa4a7-3665-7aa3-8633-2a47c42c1d78 -m gpt-5.6-sol -c model_reasoning_effort=ultra
+      » First read ALL of the AGENTS.md file and README.md file super carefully…
+ 2. claude  16:22:49     ~/projects/frankensim
+      cc --resume ba9de0d5-51bb-40f8-9029-8ea3bcfc3481 --model claude-fable-5
       (Review project for bugs and improvements)
       » study this project and look for bugs…
  ...
-› plan saved: ~/.local/state/pfr/last-plan.json  (confidence=high, 16 sessions)
+› plan saved: ~/.local/state/pfr/last-plan.json  (confidence=high, 4 sessions)
 › next: pfr --last-plan -y   or   pfr --last-plan --pick
 
-$ pfr --last-plan -y     # open all 16, verify against ps, write the report
+$ pfr --last-plan -y     # open the whole batch, verify against ps, write the report
 ```
 
 ## Design philosophy
@@ -77,7 +79,8 @@ $ pfr --last-plan -y     # open all 16, verify against ps, write the report
 2. **Discover once, open later.** Rediscovery drifts: sessions age, some get resumed by hand, new work starts. Plans freeze the decision so opening is repeatable.
 3. **Cluster first, filter second.** Already-running sessions are dropped *after* the crash pocket is chosen, so filtering cannot shift the cluster onto an unrelated burst of activity.
 4. **Never claim success without evidence.** Every open is checked against `ps`; a tab that silently shows a bare shell is a reported failure.
-5. **Your shell, your aliases.** Resume commands run in a real interactive shell. If `cod` carries your model flags, they apply.
+5. **Your shell, your aliases.** Resume commands run in a real interactive login shell, and each one pins the model and reasoning effort recorded in the session's own transcript, so a session recorded on one model never silently resumes on another.
+6. **Swarm sessions belong to the swarm manager.** Panes spawned by ntm die and recover as a swarm; pfr leaves them out unless told otherwise, so a twenty-tab recovery does not bury your four hand-typed sessions under sixteen orphaned panes.
 
 ## How it compares
 
@@ -167,7 +170,7 @@ Ghostty, even if launch flags such as `-y` are also present. macOS uses
 | `--providers LIST` | `codex`, `claude`, or both |
 | `--projects-only` | Restrict to `~/projects/...` |
 | `--include-subagents` | Keep Codex subagent threads |
-| `--include-ntm` | Keep sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms (excluded by default — ntm owns their recovery) |
+| `--include-ntm` | Keep sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms (excluded by default, since ntm owns their recovery) |
 | `--ntm-history PATH` | ntm send-history JSONL used for attribution (default `~/.local/share/ntm/history.jsonl`) |
 | `--ntm-data DIR` | ntm data dir holding `manifests/` and `checkpoints/` used for attribution (default `~/.local/share/ntm`) |
 | `--force-reopen` | Include sessions that already look live |
@@ -195,8 +198,8 @@ Ghostty, even if launch flags such as `-y` are also present. macOS uses
 | `--tabs` / `--windows` | Surface mode |
 | `--driver ui\|api\|ghostty` | macOS default `ui`; Linux default `ghostty` |
 | `--ui` / `--api` | Driver shortcuts |
-| `--delay SECS` | Pause between opens |
-| `--settle SECS` | Wait after creating a surface for the shell |
+| `--delay SECS` | Pause between surface creations (default 0.1 on macOS, 0.35 on Linux) |
+| `--settle SECS` | Wait for the shell after a keystroke-fallback surface opens (native launches need none) |
 | `--max N` | Safety cap on opens (default 40) |
 
 ### Health & isolation
@@ -256,9 +259,10 @@ On a hard power cut, processes that were mid-write stop updating files at about 
 
 1. Collect top-level sessions modified in the last `--lookback-hours`.
 2. Drop Codex subagent threads unless `--include-subagents`.
-3. Dedupe by `(provider, session_id)`, keeping the newest file.
-4. Mark live resumes from `ps`: a real `cod`/`codex`/`cc`/`claude` invocation with `resume`/`--resume` followed by exactly one UUID. **Cluster first, then drop live ones** so the crash pocket does not shift.
-5. **auto mode:** take sessions in `[boot − lookback, boot + slack]`, then the densest `--window` pocket inside that set; a session idle ten minutes before the crash falls out. If the pre-boot set is empty, fall back to a global densest window.
+3. Drop ntm-spawned sessions unless `--include-ntm`, using ntm's own records: send-history prompts (matched against each session's first and last user message), swarm manifest pane specs (project dir, agent type, spawn model), checkpoint session-id bindings, and a narrow addressed-as-a-pane phrasing check for swarms that left no record at all.
+4. Dedupe by `(provider, session_id)`, keeping the newest file.
+5. Mark live resumes from `ps`: a real `cod`/`codex`/`cc`/`claude` invocation with `resume`/`--resume` followed by exactly one UUID. **Cluster first, then drop live ones** so the crash pocket does not shift.
+6. **auto mode:** take sessions in `[boot − lookback, boot + slack]`, then the densest `--window` pocket inside that set; a session idle ten minutes before the crash falls out. If the pre-boot set is empty, fall back to a global densest window.
 
 Confidence is scored on the full pocket (including already-running members) before any `--limit` truncation. Only a tight pre-boot pocket of three or more sessions scores `high`; density-only mode never does. The rubric lives in `lib/confidence.py` and is locked by tests.
 
@@ -278,7 +282,7 @@ They run in a real interactive login shell (working directory preset per tab), s
 
 ### Ghostty open drivers
 
-**`ui` (macOS default).** One osascript invocation opens every tab in the batch. Each session gets a dedicated tab (never the default/restored tab) whose surface **runs the resume command directly** in an interactive login shell (`$SHELL -il -c '<resume>; exec $SHELL -il'`) — nothing is typed at a prompt, so submission cannot race shell startup or die in zsh's bracketed paste, and your aliases still apply. When the agent exits the tab drops back to a fresh interactive shell. If native surface creation fails for a session: System Events fallback (`⌘T` / paste / Return), which needs Accessibility. Automation for Ghostty is required either way.
+**`ui` (macOS default).** One osascript invocation opens every tab in the batch. Each session gets a dedicated tab (never the default/restored tab) whose surface **runs the resume command directly** in an interactive login shell (`$SHELL -il -c '<resume>; exec $SHELL -il'`). Nothing is typed at a prompt, so submission cannot race shell startup or die in zsh's bracketed paste, and your aliases still apply. When the agent exits the tab drops back to a fresh interactive shell. If native surface creation fails for a session: System Events fallback (`⌘T` / paste / Return), which needs Accessibility. Automation for Ghostty is required either way.
 
 **`api` (macOS).** Same batch command-launch without the keystroke fallback. Automation required.
 
@@ -304,7 +308,7 @@ Plan load refuses a plan from a different boot, older than 24h, or timestamped m
 
 ### Doctor
 
-`pfr --doctor` checks python3, core libs, writable state dir, session roots, and the platform's Ghostty hooks (Ghostty.app, osascript, and an Automation probe on macOS; the `ghostty` CLI on Linux). It also confirms the `cod` and `cc` commands resolve in a login zsh (the same kind of shell resume commands run in) and reports optional extras (`fzf`, `am`). Exit 0 when healthy; `--json` for automation.
+`pfr --doctor` checks python3, core libs, writable state dir, session roots, and the platform's Ghostty hooks (Ghostty.app, osascript, and an Automation probe on macOS; the `ghostty` CLI on Linux). It also confirms the `cod` and `cc` commands resolve in a login zsh (the same kind of shell resume commands run in), notes when ntm records are present (so you know ntm-spawned sessions will be excluded), and reports optional extras (`fzf`, `am`). Exit 0 when healthy; `--json` for automation.
 
 ## Agent skill
 
@@ -322,7 +326,7 @@ cp -R skills/pfr ~/.claude/skills/pfr
 
 Regenerates mtime-bearing fixtures (git cannot store mtimes), then runs `tests/test_*.sh`, `tests/test_*.py`, and `tests/e2e_*.sh` in name order, writing NDJSON events and per-test output under `tests/logs/` (last 50 lines dumped on failure). The default run is fully offline against fixture roots, `--fake-boot`, and canned `--ps-file` tables: no live Ghostty, no network, no writes to real session dirs.
 
-Suites: smoke, clustering (densest-window ties, pre-boot outliers, dedupe, running-mark regression), titles/previews, plan + confidence rubric with a golden fixture, doctor contracts, tab order, verification, installer (offline archives, upgrade detection, collision refusal), and e2e dry-run / plan-roundtrip / skip-running / installed-CLI (stdin-piped install into an isolated HOME, then doctor, discovery, plan roundtrip, and an upgrade driven through the real `pfr` launcher symlink on PATH).
+Suites: smoke, clustering (densest-window ties, pre-boot outliers, dedupe, running-mark regression), titles/previews, ntm attribution + model pinning (all four attribution layers, the habitual-opener regression, and recorded-model resume commands), plan + confidence rubric with a golden fixture, doctor contracts (including a symlinked-launcher regression), tab order, verification, installer (offline archives, upgrade detection, collision refusal), and e2e dry-run / plan-roundtrip / skip-running / installed-CLI (stdin-piped install into an isolated HOME, then doctor, discovery, plan roundtrip, and an upgrade driven through the real `pfr` launcher symlink on PATH). An opt-in live suite (`PFR_LIVE=1`) opens a real Ghostty tab and proves the launched command lands in the process table.
 
 ## Layout
 
@@ -355,7 +359,7 @@ power_failure_resumer/
 | Too many sessions | `--projects-only`, `--providers codex`, or `--pick` |
 | `low` confidence warning | The dense pocket may not be a crash; review before opening |
 | Keystrokes go nowhere (macOS fallback) | Grant Accessibility; do not type while the fallback is running; larger `--settle` |
-| Tab opens a bare shell | Native launch failed and the fallback pasted nothing — check Automation/Accessibility, re-run |
+| Tab opens a bare shell | Native launch failed and the fallback pasted nothing; check Automation/Accessibility, then re-run |
 | Verify failed / not in `ps` | The resume likely never executed in that tab; check the tab and re-run for that session |
 | Wrong sessions excluded as ntm | `--include-ntm`, or point `--ntm-history` at the right file |
 | `cod` / `cc` not found in tab | Confirm the aliases work in a normal Ghostty tab (`.zshrc`) |
@@ -371,6 +375,7 @@ power_failure_resumer/
 - **Claude's directory encoding is lossy** (every non-alphanumeric character becomes `-`); pfr prefers the `cwd` embedded in the JSONL and only trusts a decoded path that exists.
 - **macOS automation needs permissions.** First run prompts for Automation (and Accessibility if the fallback fires); `pfr --doctor` reports what is missing.
 - **A clean shutdown does not look like a crash**, and pfr scores it accordingly rather than guessing.
+- **ntm attribution is only as good as ntm's records.** A swarm driven entirely outside `ntm send`, with no manifest and no checkpoint, is caught only by the phrasing check on its prompts; a pane whose prompts never mention pane or swarm vocabulary can slip through. The `skipped:` line and per-session previews make stragglers easy to spot before opening.
 
 ## FAQ
 
@@ -388,6 +393,12 @@ That is the live run log, so you can watch the resume happen. Agent-mail is the 
 
 **Does it work on Linux?**
 Yes. Discovery, plans, and verification are identical; opening uses the `ghostty` CLI, one window per session, since there is no AppleScript.
+
+**Where did my ntm swarm sessions go?**
+They are excluded on purpose: ntm owns swarm recovery, and reopening twenty panes as loose Ghostty tabs would leave you with an orphaned mob. The `skipped: N ntm-spawned session(s)` line reports the count; `--include-ntm` brings them back if you really want them.
+
+**Will resuming change which model a session uses?**
+No. Discovery reads the model and reasoning effort recorded in each session's transcript and pins them on the resume command (`-m` and `-c model_reasoning_effort=` for Codex, `--model` for Claude), so a session recorded on one model resumes on that model even when your alias defaults to another.
 
 **Why not just re-run `cod resume` from shell history?**
 For one session, do that. For a twenty-tab swarm across six projects, the cluster + plan + verify loop is one command instead of half an hour.

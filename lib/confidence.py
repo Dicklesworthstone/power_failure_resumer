@@ -92,6 +92,7 @@ def score_discovery(discovery: Dict) -> Tuple[str, List[str]]:
 _SESSION_FIELDS = (
     "provider", "session_id", "cwd", "mtime", "path",
     "resume_cmd", "title", "preview", "is_subagent", "is_running",
+    "model", "effort", "is_ntm",
 )
 
 

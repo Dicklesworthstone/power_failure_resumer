@@ -124,6 +124,15 @@ def main() -> None:
         f"cc --resume {CLAUDE_UUID_TOP} --model claude-fable-5"
     ), cc["resume_cmd"]
 
+    # Plans must carry model/effort/is_ntm through build_plan (regression:
+    # the session field whitelist dropped them, so --last-plan resumes
+    # silently lost their model pinning).
+    import confidence
+    plan = confidence.build_plan(data, created_at="2026-08-03T00:00:00+00:00")
+    plan_cod = [s for s in plan["sessions"] if s["session_id"] == CODEX_UUID_TOP][0]
+    assert plan_cod["model"] == "gpt-5.6-sol" and plan_cod["effort"] == "ultra", plan_cod
+    assert plan_cod["is_ntm"] is False
+
     # --include-ntm restores the ntm sessions.
     data = run_discovery(codex_root, claude_root, history, extra=("--include-ntm",))
     ids = {s["session_id"] for s in data["sessions"]}

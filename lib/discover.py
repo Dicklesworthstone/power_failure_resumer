@@ -482,9 +482,15 @@ class NtmMarkers:
         self.prompts: set = set()          # normalized `ntm send` prompt texts
         self.session_ids: set = set()      # provider session UUIDs (checkpoints)
         self.pane_specs: set = set()       # (provider, project_dir, model)
+        self.present = False               # ntm state exists on this machine
 
     def __bool__(self) -> bool:
-        return bool(self.prompts or self.session_ids or self.pane_specs)
+        # Truthy whenever ntm is present at all: swarms can leave zero records
+        # (observed in the wild), and the phrasing fallback must still run on
+        # machines that actually use ntm. Machines without ntm skip everything.
+        return self.present or bool(
+            self.prompts or self.session_ids or self.pane_specs
+        )
 
 
 _NTM_TYPE_TO_PROVIDER = {"cod": "codex", "codex": "codex", "cc": "claude", "claude": "claude"}
@@ -527,6 +533,7 @@ def load_ntm_prompts(path: Path) -> set:
 
 def load_ntm_markers(history_path: Path, data_dir: Path) -> NtmMarkers:
     markers = NtmMarkers()
+    markers.present = history_path.is_file() or data_dir.is_dir()
     markers.prompts = load_ntm_prompts(history_path)
 
     # Manifests: one JSON per swarm with pane agent specs. A pane spawned with
@@ -603,7 +610,7 @@ def is_ntm_session(
 
 
 def is_ntm_prompt(first_user: str, prompts: set) -> bool:
-    """True when a session's first real user message is a recorded ntm send.
+    """True when a session user message (first or last) is a recorded ntm send.
 
     Exact normalized equality is the primary signal. A prefix match in either
     direction (bounded transcripts truncate; ntm can append boilerplate) also

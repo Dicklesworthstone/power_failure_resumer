@@ -229,6 +229,19 @@ def main() -> None:
     assert wave_uuid not in ids, "pane-addressed phrasing must be excluded"
     assert tool_uuid in ids, "mentioning the ntm tool must NOT be excluded"
 
+    # The phrasing fallback must also fire when ntm exists but recorded
+    # nothing (observed: swarm with no history entry, no manifest, empty
+    # state.db). An existing-but-empty ntm data dir is enough presence.
+    empty_ntm = tmp / "ntm-empty"
+    empty_ntm.mkdir()
+    data = run_discovery(codex_root, claude_root, tmp / "absent.jsonl", ntm_data=empty_ntm)
+    ids = {s["session_id"] for s in data["sessions"]}
+    assert wave_uuid not in ids, "phrasing must work with zero ntm records"
+    # And a machine without ntm at all attributes nothing.
+    data = run_discovery(codex_root, claude_root, tmp / "absent.jsonl")
+    ids = {s["session_id"] for s in data["sessions"]}
+    assert wave_uuid in ids, "no ntm on the machine → no ntm attribution"
+
     print("ntm + model OK")
 
 

@@ -1,21 +1,27 @@
 #!/usr/bin/osascript
--- Open a Ghostty surface using defaults as much as possible.
+-- Open Ghostty surfaces that RUN each session's command directly (ui driver).
 --
--- Preferred path (tip Ghostty scripting dictionary):
---   new tab/window with working directory set, then `input text` the resume command.
---   No keystroke simulation, no clipboard, survives Cmd+T rebinds.
+-- Same native path as open_sessions.applescript: the surface configuration
+-- `command` property launches the user's login shell with the resume command,
+-- so nothing is typed at a prompt. The previous `input text` approach pasted
+-- the line (bracketed paste), which zsh leaves sitting unsubmitted in the
+-- line editor — tabs opened but nothing ran. All surfaces open in ONE
+-- osascript invocation for speed.
 --
--- Fallback path (System Events):
---   Used only when native scripting cannot create a surface OR cannot deliver input.
---   If a surface was created but input failed, fallback pastes into the *front*
---   terminal without opening another tab (avoids double-open).
+-- Fallback path (System Events, per surface): used only when native surface
+-- creation fails. Opens Cmd+T/Cmd+N in the default shell, pastes
+-- "cd <dir> && <cmd>" and presses Return. Needs Accessibility. The clipboard
+-- is preserved around the whole batch when any fallback fires.
 --
 -- Args:
---   1: working directory
---   2: resume command (e.g. "cod resume <uuid>" or "cc --resume <uuid>")
---   3: mode — "tab" (default) or "window"
---   4: "1" reserved (ignored); always opens a dedicated surface
---   5: settle delay seconds after creating a surface (default 0.55)
+--   1: mode — "tab" (default) or "window"
+--   2: settle seconds after a fallback surface opens (default 0.55)
+--   3: inter-surface delay seconds
+--   4: login shell path (e.g. /bin/zsh)
+--   5,6 / 7,8 / …: pairs of <working dir> <command text>
+--
+-- Output: one line per pair — "ok", "ok fallback", or "fail <reason>". The
+-- caller maps line N to pair N; one failed surface must not abort the rest.
 
 on shellQuote(p)
 	set s to p as text
@@ -28,217 +34,133 @@ on shellQuote(p)
 	return "'" & s & "'"
 end shellQuote
 
-on trimTrailingWhitespace(valueText)
-	set trimmedText to valueText as text
-	repeat while (length of trimmedText) > 0
-		set finalChar to character -1 of trimmedText
-		if finalChar is not in {space, return, linefeed, tab} then exit repeat
-		if (length of trimmedText) = 1 then
-			set trimmedText to ""
-		else
-			set trimmedText to text 1 thru -2 of trimmedText
-		end if
-	end repeat
-	return trimmedText
-end trimTrailingWhitespace
+on launchCommand(shellPath, payload)
+	-- Run the payload in an interactive login shell (aliases/functions from rc
+	-- files apply), then drop back to a fresh interactive shell so the tab
+	-- stays usable after the agent exits.
+	set keepAlive to payload & "; exec " & shellPath & " -il"
+	return shellPath & " -il -c " & my shellQuote(keepAlive)
+end launchCommand
 
-on terminalShowsPrompt(termObj)
-	-- Prefer Ghostty's scripting contents when available. The current Ghostty
-	-- dictionary may not expose it, so read the focused terminal's accessible
-	-- text area as an equivalent contents source before conceding the fallback.
-	try
-		tell application "Ghostty"
-			set screenText to contents of termObj as text
-		end tell
-	on error
+on openOneSurface(workDir, cmdText, openMode, shellPath)
+	tell application "Ghostty"
+		set cfg to new surface configuration
+		set initial working directory of cfg to workDir
+		set command of cfg to my launchCommand(shellPath, cmdText)
 		try
-			tell application "System Events"
-				tell process "Ghostty"
-					set screenText to value of text area 1 of scroll area 1 of UI element 1 of UI element 1 of window 1 as text
-				end tell
-			end tell
-		on error
-			return missing value
+			set wait after command of cfg to true
 		end try
-	end try
-
-	set screenText to my trimTrailingWhitespace(screenText)
-	if (length of screenText) = 0 then return false
-	set finalChar to character -1 of screenText
-	return finalChar is in "$%#>❯❱➜"
-end terminalShowsPrompt
-
-on waitForShellPrompt(termObj, settleSecs)
-	-- Poll at roughly 150 ms for no more than 4× --settle. A readable terminal
-	-- without a recognized prompt simply uses the bounded timeout; an unreadable
-	-- terminal preserves the former fixed-settle behavior.
-	set settleMaxSecs to settleSecs * 4
-	if settleMaxSecs < 0 then set settleMaxSecs to 0
-	set elapsedSecs to 0
-	repeat while elapsedSecs < settleMaxSecs
-		set promptVisible to my terminalShowsPrompt(termObj)
-		if promptVisible is missing value then
-			delay settleSecs
-			return false
+		if openMode is "window" then
+			set newWindow to new window with configuration cfg
+		else
+			try
+				set win to front window
+				set newTab to new tab in win with configuration cfg
+			on error
+				set newWindow to new window with configuration cfg
+			end try
 		end if
-		if promptVisible then return true
-		set remainingSecs to settleMaxSecs - elapsedSecs
-		set pollSecs to 0.15
-		if remainingSecs < pollSecs then set pollSecs to remainingSecs
-		if pollSecs > 0 then delay pollSecs
-		set elapsedSecs to elapsedSecs + pollSecs
-	end repeat
-	return false
-end waitForShellPrompt
+	end tell
+end openOneSurface
+
+on fallbackOneSurface(workDir, cmdText, openMode, settleSecs)
+	-- Native creation failed entirely: open a default-shell surface with
+	-- keystrokes and paste the command. The pasted line needs its own cd
+	-- because the fallback surface cannot set a working directory.
+	set lineToType to "cd " & my shellQuote(workDir) & " && " & cmdText
+	set the clipboard to lineToType
+	tell application "System Events"
+		if not (exists process "Ghostty") then
+			error "Ghostty process not found for UI automation"
+		end if
+		tell process "Ghostty"
+			set frontmost to true
+			delay 0.1
+			if openMode is "window" then
+				keystroke "n" using command down
+			else
+				keystroke "t" using command down
+			end if
+			-- The fallback has no terminal reference for the new surface; a
+			-- fixed settle lets the default shell finish its rc files.
+			delay settleSecs
+			keystroke "u" using control down
+			delay 0.06
+			keystroke "v" using command down
+			delay 0.3
+			keystroke return
+		end tell
+	end tell
+end fallbackOneSurface
 
 on run argv
-	if (count of argv) < 2 then
-		error "usage: open_sessions_ui.applescript <cwd> <resume_cmd> [tab|window] [is_first 0|1] [settle_secs]"
+	if (count of argv) < 6 then
+		error "usage: open_sessions_ui.applescript <tab|window> <settle_secs> <delay_secs> <shell> <cwd> <cmd> [<cwd> <cmd> …]"
 	end if
 
-	set workDir to item 1 of argv as text
-	set resumeCmd to item 2 of argv as text
-	set openMode to "tab"
+	set openMode to item 1 of argv as text
 	set settleSecs to 0.55
+	try
+		set settleSecs to (item 2 of argv as real)
+	end try
+	set delaySecs to 0.1
+	try
+		set delaySecs to (item 3 of argv as real)
+	end try
+	if delaySecs < 0 then set delaySecs to 0
+	set shellPath to item 4 of argv as text
 
-	if (count of argv) ≥ 3 then set openMode to item 3 of argv as text
-	-- argv 4 (is_first) ignored: always open a dedicated tab/window.
-	if (count of argv) ≥ 5 then
-		try
-			set settleSecs to (item 5 of argv as real)
-		end try
+	if ((count of argv) - 4) mod 2 is not 0 then
+		error "argv must contain <cwd> <cmd> pairs after the fixed arguments"
 	end if
 
-	set lineToType to "cd " & my shellQuote(workDir) & " && " & resumeCmd
-
-	set createdSurface to false
-	set nativeErrText to ""
-	set termObj to missing value
-	set newTab to missing value
-	set newWindow to missing value
-
-	-- ---------- Preferred: Ghostty scripting (no keystrokes) ----------
-	try
-		tell application "Ghostty"
-			activate
-			delay 0.12
-
-			set cfg to new surface configuration
-			set initial working directory of cfg to workDir
-			try
-				set wait after command of cfg to true
-			end try
-
-			if openMode is "window" then
-				set newWindow to new window with configuration cfg
-				set createdSurface to true
-				try
-					set termObj to focused terminal of selected tab of newWindow
-				on error
-					delay 0.25
-					set termObj to focused terminal of selected tab of newWindow
-				end try
-			else
-				try
-					set win to front window
-					set newTab to new tab in win with configuration cfg
-					set createdSurface to true
-				on error
-					set newWindow to new window with configuration cfg
-					set createdSurface to true
-				end try
-				try
-					if newTab is not missing value then
-						set termObj to focused terminal of newTab
-					else
-						set termObj to focused terminal of selected tab of newWindow
-					end if
-				on error
-					delay 0.25
-					if newTab is not missing value then
-						set termObj to focused terminal of newTab
-					else
-						set termObj to focused terminal of selected tab of newWindow
-					end if
-				end try
-			end if
-		end tell
-
-		if termObj is missing value then error "no terminal surface"
-		try
-			tell application "Ghostty" to focus termObj
-		end try
-		my waitForShellPrompt(termObj, settleSecs)
-
-		tell application "Ghostty"
-			-- Retry once: first attempt can race shell rc on a brand-new surface.
-			try
-				input text lineToType & linefeed to termObj
-			on error
-				delay (settleSecs + 0.25)
-				input text lineToType & linefeed to termObj
-			end try
-		end tell
-		return "native"
-	on error nativeErr
-		set nativeErrText to nativeErr as text
-	end try
-
-	-- ---------- Fallback: System Events ----------
-	-- If we already created a surface, only re-deliver input (no new Cmd+T).
 	tell application "Ghostty" to activate
-	delay 0.15
+	delay 0.1
 
 	set oldClip to missing value
-	try
-		-- Preserve the native value. Coercing to text destroys image, file, and
-		-- rich clipboard contents when the fallback path runs.
-		set oldClip to the clipboard
-	on error clipErr
-		error "cannot preserve clipboard for UI fallback: " & (clipErr as text)
-	end try
-	set the clipboard to lineToType
-
-	try
-		tell application "System Events"
-			if not (exists process "Ghostty") then
-				error "Ghostty process not found for UI automation (native also failed: " & nativeErrText & ")"
+	set clipSaved to false
+	set resultLines to {}
+	set pairIndex to 5
+	repeat while pairIndex < (count of argv)
+		set workDir to item pairIndex of argv as text
+		set cmdText to item (pairIndex + 1) of argv as text
+		try
+			my openOneSurface(workDir, cmdText, openMode, shellPath)
+			set end of resultLines to "ok"
+		on error nativeErr
+			-- Preserve the native clipboard value once for the whole batch.
+			-- Coercing to text destroys image/file/rich clipboard contents.
+			if clipSaved is false then
+				try
+					set oldClip to the clipboard
+					set clipSaved to true
+				on error clipErr
+					set end of resultLines to "fail cannot preserve clipboard for UI fallback: " & clipErr
+				end try
 			end if
-			tell process "Ghostty"
-				set frontmost to true
-				delay 0.1
+			if clipSaved then
+				try
+					my fallbackOneSurface(workDir, cmdText, openMode, settleSecs)
+					set end of resultLines to "ok fallback"
+				on error fallbackErr
+					set end of resultLines to "fail native: " & nativeErr & "; fallback: " & fallbackErr
+				end try
+			end if
+		end try
+		set pairIndex to pairIndex + 2
+		if pairIndex < (count of argv) and delaySecs > 0 then delay delaySecs
+	end repeat
 
-				if createdSurface is false then
-					if openMode is "window" then
-						keystroke "n" using command down
-				else
-					keystroke "t" using command down
-				end if
-				-- The fallback has no stable terminal reference for the new tab/window.
-				-- Keep the fixed delay here: probing window 1 could see the old surface's
-				-- prompt before the Cmd+T/Cmd+N focus transition completes.
-				delay settleSecs
-				else
-					delay 0.15
-				end if
-
-				keystroke "u" using control down
-				delay 0.06
-				keystroke "v" using command down
-				delay 0.3
-				keystroke return
-			end tell
-		end tell
-	on error fallbackErr number fallbackErrNum
+	if clipSaved then
+		delay 0.12
 		try
 			set the clipboard to oldClip
 		end try
-		error fallbackErr number fallbackErrNum
-	end try
+	end if
 
-	delay 0.12
-	try
-		set the clipboard to oldClip
-	end try
-	return "fallback"
+	set oldDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to linefeed
+	set joined to resultLines as text
+	set AppleScript's text item delimiters to oldDelims
+	return joined
 end run

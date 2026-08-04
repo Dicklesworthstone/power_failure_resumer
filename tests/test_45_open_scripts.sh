@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Structural AppleScript contracts: compile both drivers and protect the UI
-# fallback from creating a second Ghostty surface after native creation.
+# Structural AppleScript contracts: compile both drivers and lock the
+# command-launch design — surfaces RUN their command via the surface
+# configuration `command` property; nothing is typed into a prompt (typed
+# `input text` was pasted via bracketed paste and never submitted).
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 API="$PFR_ROOT/lib/open_sessions.applescript"
@@ -12,13 +14,10 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 fi
 
 # Parse executable lines instead of grepping raw source, so comments cannot
-# satisfy an invariant. The block matcher also verifies that Cmd+T/Cmd+N stay
-# nested under the actual createdSurface=false branch.
+# satisfy an invariant.
 python3 - "$API" "$UI" "$PFR" <<'PY' || fail "open script contract regression"
 from pathlib import Path
-import re
 import sys
-
 
 
 def executable_lines(path: str) -> list[str]:
@@ -40,60 +39,59 @@ def require_prefix(lines: list[str], statement: str, label: str) -> None:
 
 
 api, ui, cli = map(executable_lines, sys.argv[1:])
+
+# Shared batch argv contract + command-launch core, behaviorally aligned.
 core = (
-    "set workDir to item 1 of argv as text",
-    "set resumeCmd to item 2 of argv as text",
-    "if (count of argv) ≥ 3 then set openMode to item 3 of argv as text",
-    'set lineToType to "cd " & my shellQuote(workDir) & " && " & resumeCmd',
+    "set openMode to item 1 of argv as text",
+    "set delaySecs to (item 3 of argv as real)",
+    "set shellPath to item 4 of argv as text",
+    'set keepAlive to payload & "; exec " & shellPath & " -il"',
+    'return shellPath & " -il -c " & my shellQuote(keepAlive)',
+    "set command of cfg to my launchCommand(shellPath, cmdText)",
+    "set initial working directory of cfg to workDir",
+    "set wait after command of cfg to true",
+    "set pairIndex to pairIndex + 2",
 )
-for name, source, input_line in (
-    ("API", api, "input text lineToType & linefeed to term"),
-    ("UI", ui, "input text lineToType & linefeed to termObj"),
-):
+for name, source in (("API", api), ("UI", ui)):
     for statement in core:
-        require(source, statement, f"{name} argv/command contract")
-    assert source.count(input_line) == 2, f"{name} must retry native input exactly once"
+        require(source, statement, f"{name} batch/command contract")
+    # The typing path is the regression this design replaces: a driver must
+    # never deliver the resume line as terminal input.
+    assert not any(line.startswith("input text") for line in source), (
+        f"{name} must not type/paste into the terminal on the native path"
+    )
+    # One failed surface must not abort the rest of the batch.
+    assert any('"fail ' in line for line in source), (
+        f"{name} must report per-surface failures instead of erroring out"
+    )
 
-require(api, "set settleSecs to (item 4 of argv as real)", "API settle argv contract")
-require(ui, "set settleSecs to (item 5 of argv as real)", "UI settle argv contract")
-require_prefix(cli, 'osascript "$OPEN_API_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "$SETTLE_SECONDS"', "CLI API argv contract")
-require_prefix(cli, 'osascript "$OPEN_UI_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "0" "$SETTLE_SECONDS"', "CLI UI argv contract")
+require(ui, "set settleSecs to (item 2 of argv as real)", "UI settle argv contract")
 
-native_create = re.compile(r"set new(?:Tab|Window) to new (?:tab(?: in win)?|window) with configuration cfg")
-for index, line in enumerate(ui):
-    if native_create.fullmatch(line):
-        assert ui[index + 1:index + 2] == ["set createdSurface to true"], (
-            f"native creation at line {index + 1} does not mark createdSurface"
-        )
+# CLI invokes each driver once with the full batch argv.
+require_prefix(cli, 'local -a args=("$OPEN_MODE" "$SETTLE_SECONDS" "$DELAY_SECONDS"', "CLI batch argv contract")
+require_prefix(cli, 'ui)      open_batch_osascript "$OPEN_UI_AS"', "CLI UI driver dispatch")
+require_prefix(cli, 'api)     open_batch_osascript "$OPEN_API_AS"', "CLI API driver dispatch")
 
-guard = "if createdSurface is false then"
-stack: list[str] = []
-keys = ('keystroke "n" using command down', 'keystroke "t" using command down')
-seen = {key: 0 for key in keys}
-inside_guard: list[str] = []
-for line in ui:
-    if line.startswith("if ") and line.endswith(" then"):
-        stack.append(line)
-        continue
-    if line == "end if":
-        assert stack, "unbalanced AppleScript end if"
-        stack.pop()
-        continue
-    if guard in stack:
-        inside_guard.append(line)
-    if line in seen:
-        seen[line] += 1
-        assert guard in stack, f"{line!r} is not guarded by createdSurface=false"
-assert not stack, "unbalanced AppleScript if block"
-assert all(count == 1 for count in seen.values()), "expected one Cmd+N and one Cmd+T creation path"
-assert "my waitForShellPrompt(missing value, settleSecs)" not in inside_guard, (
-    "fallback must not probe an unbound front window after Cmd+T/Cmd+N"
+# UI fallback: keystroke surface creation lives only in the fallback handler,
+# pastes with its own cd (fallback surfaces cannot set a working directory),
+# and preserves the clipboard around the batch.
+assert "on fallbackOneSurface(workDir, cmdText, openMode, settleSecs)" in ui, (
+    "UI missing fallback handler"
 )
-assert "delay settleSecs" in inside_guard, "fallback must retain its fixed post-open settle"
-
+fallback_start = ui.index("on fallbackOneSurface(workDir, cmdText, openMode, settleSecs)")
+fallback_end = ui.index("end fallbackOneSurface")
+fallback_body = ui[fallback_start:fallback_end]
+for key in ('keystroke "t" using command down', 'keystroke "n" using command down'):
+    assert key in fallback_body, f"UI fallback missing {key!r}"
+    assert ui.count(key) == 1, f"{key!r} must exist only in the fallback handler"
+require(fallback_body, 'set lineToType to "cd " & my shellQuote(workDir) & " && " & cmdText', "UI fallback cd contract")
+require(fallback_body, "delay settleSecs", "UI fallback settle")
+require(fallback_body, "keystroke return", "UI fallback must submit with Return")
 require(ui, "set oldClip to the clipboard", "fallback saves clipboard")
-require(ui, "set the clipboard to lineToType", "fallback stages command")
-assert ui.count("set the clipboard to oldClip") >= 2, "fallback must restore clipboard on error and success"
+require(ui, "set the clipboard to oldClip", "fallback restores clipboard")
+
+# API driver stays fallback-free (no keystroke simulation at all).
+assert not any("keystroke" in line for line in api), "API must not simulate keystrokes"
 PY
 
 echo "open script invariants OK"

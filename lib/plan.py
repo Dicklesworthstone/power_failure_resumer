@@ -32,7 +32,7 @@ from typing import Dict, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import confidence  # noqa: E402
-from discover import UUID_RE, fmt_ts, get_boot_time  # noqa: E402
+from discover import EFFORT_RE, MODEL_RE, UUID_RE, fmt_ts, get_boot_time  # noqa: E402
 
 ARCHIVE_KEEP = 20
 STALE_AGE_SECONDS = 24 * 3600.0
@@ -225,6 +225,16 @@ def validate_plan(plan: object) -> list[str]:
         for name in ("is_subagent", "is_running"):
             if not isinstance(session.get(name), bool):
                 errors.append(f"{prefix}.{name} must be boolean")
+        if not isinstance(session.get("is_ntm", False), bool):
+            errors.append(f"{prefix}.is_ntm must be boolean")
+        # Optional model/effort feed the reconstructed resume command, so they
+        # get the same strict character validation as in discovery.
+        model = session.get("model", "")
+        if not isinstance(model, str) or (model and not MODEL_RE.fullmatch(model)):
+            errors.append(f"{prefix}.model must be a valid model name or empty")
+        effort = session.get("effort", "")
+        if not isinstance(effort, str) or (effort and not EFFORT_RE.fullmatch(effort)):
+            errors.append(f"{prefix}.effort must be a lowercase word or empty")
     return errors
 
 
@@ -298,11 +308,19 @@ def cmd_load(args: argparse.Namespace) -> int:
     for session in plan["sessions"]:
         entry = dict(session)
         sid = entry["session_id"]
-        entry["resume_cmd"] = (
-            f"cod resume {sid}"
-            if entry["provider"] == "codex"
-            else f"cc --resume {sid}"
-        )
+        model = entry.get("model") or ""
+        effort = entry.get("effort") or ""
+        if entry["provider"] == "codex":
+            cmd = f"cod resume {sid}"
+            if model:
+                cmd += f" -m {model}"
+            if effort:
+                cmd += f" -c model_reasoning_effort={effort}"
+        else:
+            cmd = f"cc --resume {sid}"
+            if model:
+                cmd += f" --model {model}"
+        entry["resume_cmd"] = cmd
         out["sessions"].append(entry)
     out["anchor_mtime_human"] = fmt_ts(plan.get("anchor_mtime"))
     out["session_count"] = len(plan.get("sessions") or [])

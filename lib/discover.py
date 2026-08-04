@@ -37,6 +37,25 @@ UUID_RE = re.compile(
 
 _AGENT_EXECUTABLES = frozenset({"cc", "claude", "cod", "codex"})
 
+# Model/effort strings are authority-bearing: they are joined into resume
+# commands by the shell. Anything not matching these is dropped, not escaped.
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+EFFORT_RE = re.compile(r"[a-z]{1,16}")
+
+# ntm (tmux agent swarm manager) leaves three usable records of the sessions
+# it spawned/drove, none complete on its own; pfr layers them:
+#   1. history.jsonl — every prompt sent via `ntm send`,
+#   2. manifests/*.json — per-swarm pane specs (project dir, agent type, -m model),
+#   3. checkpoints/**/session.json — provider session UUIDs (newer ntm versions).
+# Sessions matching any layer were ntm-driven and have their own recovery path.
+DEFAULT_NTM_DATA = Path.home() / ".local" / "share" / "ntm"
+DEFAULT_NTM_HISTORY = DEFAULT_NTM_DATA / "history.jsonl"
+# Prompts shorter than this are too generic to attribute ("continue", "ok").
+NTM_MIN_PROMPT_CHARS = 12
+# Prefix matches (transcript truncation, appended boilerplate) need more text
+# before they count as evidence.
+NTM_MIN_PREFIX_CHARS = 48
+
 
 @dataclass
 class Session:
@@ -51,6 +70,9 @@ class Session:
     started_hint: str = ""
     is_running: bool = False
     preview: str = ""
+    model: str = ""
+    effort: str = ""
+    is_ntm: bool = False
 
 
 def eprint(*args: object) -> None:
@@ -383,6 +405,262 @@ def extract_codex_last_user(path: Path, max_lines: int = 200) -> str:
     return extract_codex_first_user(path, max_lines)
 
 
+def _validated_model(value: object) -> str:
+    if isinstance(value, str) and MODEL_RE.fullmatch(value):
+        return value
+    return ""
+
+
+def _validated_effort(value: object) -> str:
+    if isinstance(value, str) and EFFORT_RE.fullmatch(value):
+        return value
+    return ""
+
+
+def extract_codex_model(path: Path) -> Tuple[str, str]:
+    """Return (model, effort) from the newest turn_context record.
+
+    Codex warns when a session recorded with one model is resumed with
+    another, so the resume command pins whatever the session last used.
+    The newest turn_context wins: a session switched mid-way should resume
+    with its final model. Tail first; fall back to the head for short files.
+    """
+    for lines in (reversed(_tail_lines(path)), iter(_head_lines(path, 200))):
+        for line in lines:
+            if '"turn_context"' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict) or obj.get("type") != "turn_context":
+                continue
+            payload = as_dict_payload(obj.get("payload"))
+            model = _validated_model(payload.get("model"))
+            effort = _validated_effort(payload.get("effort"))
+            if model or effort:
+                return model, effort
+    return "", ""
+
+
+def extract_claude_model(path: Path) -> str:
+    """Model of the newest assistant message in a bounded transcript tail."""
+    for line in reversed(_tail_lines(path)):
+        if '"model"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "assistant":
+            continue
+        msg = obj.get("message")
+        if isinstance(msg, dict):
+            model = _validated_model(msg.get("model"))
+            if model:
+                return model
+    return ""
+
+
+def _norm_prompt(text: str) -> str:
+    return " ".join(text.split())
+
+
+class NtmMarkers:
+    """Evidence that sessions were ntm-driven, from ntm's on-disk records."""
+
+    def __init__(self) -> None:
+        self.prompts: set = set()          # normalized `ntm send` prompt texts
+        self.session_ids: set = set()      # provider session UUIDs (checkpoints)
+        self.pane_specs: set = set()       # (provider, project_dir, model)
+
+    def __bool__(self) -> bool:
+        return bool(self.prompts or self.session_ids or self.pane_specs)
+
+
+_NTM_TYPE_TO_PROVIDER = {"cod": "codex", "codex": "codex", "cc": "claude", "claude": "claude"}
+_NTM_MODEL_ARG_RE = re.compile(r"(?:^|\s)(?:-m|--model)[= ](\S+)")
+
+
+def load_ntm_prompts(path: Path) -> set:
+    """Normalized prompt texts ntm has sent to panes (empty set when absent)."""
+    prompts: set = set()
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                prompt = obj.get("prompt")
+                if not isinstance(prompt, str):
+                    continue
+                norm = _norm_prompt(prompt)
+                if len(norm) >= NTM_MIN_PROMPT_CHARS:
+                    prompts.add(norm)
+    except OSError:
+        return set()
+    return prompts
+
+
+def load_ntm_markers(history_path: Path, data_dir: Path) -> NtmMarkers:
+    markers = NtmMarkers()
+    markers.prompts = load_ntm_prompts(history_path)
+
+    # Manifests: one JSON per swarm with pane agent specs. A pane spawned with
+    # an explicit model in a project dir identifies (provider, cwd, model).
+    manifests_dir = data_dir / "manifests"
+    if manifests_dir.is_dir():
+        for manifest in manifests_dir.glob("*.json"):
+            try:
+                obj = json.loads(manifest.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            project = obj.get("project_dir")
+            if not isinstance(project, str) or not project.startswith("/"):
+                continue
+            for agent in obj.get("agents") or []:
+                if not isinstance(agent, dict):
+                    continue
+                provider = _NTM_TYPE_TO_PROVIDER.get(agent.get("type"))
+                if not provider:
+                    continue
+                command = agent.get("command")
+                if not isinstance(command, str):
+                    continue
+                m = _NTM_MODEL_ARG_RE.search(command)
+                if m:
+                    model = m.group(1).strip("\"'")
+                    if MODEL_RE.fullmatch(model):
+                        markers.pane_specs.add((provider, project, model))
+
+    # Checkpoints: newer ntm persists per-pane provider session UUIDs.
+    checkpoints_dir = data_dir / "checkpoints"
+    if checkpoints_dir.is_dir():
+        for snapshot in checkpoints_dir.glob("*/*/session.json"):
+            try:
+                obj = json.loads(snapshot.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            for pane in obj.get("panes") or []:
+                if not isinstance(pane, dict):
+                    continue
+                sid = pane.get("session_id")
+                if isinstance(sid, str) and UUID_RE.fullmatch(sid):
+                    markers.session_ids.add(sid.lower())
+    return markers
+
+
+def is_ntm_session(
+    markers: Optional[NtmMarkers],
+    provider: str,
+    session_id: str,
+    cwd: str,
+    model: str,
+    user_texts: Sequence[str],
+) -> bool:
+    """True when ntm's records attribute this session to an ntm swarm."""
+    if not markers:
+        return False
+    if session_id.lower() in markers.session_ids:
+        return True
+    if model and (provider, cwd, model) in markers.pane_specs:
+        return True
+    return any(is_ntm_prompt(text, markers.prompts) for text in user_texts if text)
+
+
+def is_ntm_prompt(first_user: str, prompts: set) -> bool:
+    """True when a session's first real user message is a recorded ntm send.
+
+    Exact normalized equality is the primary signal. A prefix match in either
+    direction (bounded transcripts truncate; ntm can append boilerplate) also
+    counts, but only with substantial shared text — never for short prompts a
+    human could plausibly retype.
+    """
+    if not prompts:
+        return False
+    norm = _norm_prompt(first_user)
+    if len(norm) < NTM_MIN_PROMPT_CHARS:
+        return False
+    if norm in prompts:
+        return True
+    if len(norm) >= NTM_MIN_PREFIX_CHARS:
+        for prompt in prompts:
+            if len(prompt) >= NTM_MIN_PREFIX_CHARS and (
+                norm.startswith(prompt) or prompt.startswith(norm)
+            ):
+                return True
+    return False
+
+
+def extract_claude_first_user_raw(path: Path, max_lines: int = 200) -> str:
+    """Unclipped first real user message (for ntm attribution matching)."""
+    for line in _head_lines(path, max_lines):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "user":
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        text = _first_text_block(msg.get("content"))
+        if text.strip() and not _is_boilerplate(text):
+            return text
+    return ""
+
+
+def extract_codex_first_user_raw(path: Path, max_lines: int = 200) -> str:
+    """Unclipped first real Codex user message (for ntm attribution matching)."""
+    for line in _head_lines(path, max_lines):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        text = _codex_user_text(obj)
+        if text.strip() and not _is_boilerplate(text):
+            return text
+    return ""
+
+
+def extract_codex_last_user_raw(path: Path) -> str:
+    """Unclipped last real Codex user message (for ntm attribution matching)."""
+    for line in reversed(_tail_lines(path)):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        text = _codex_user_text(obj)
+        if text.strip() and not _is_boilerplate(text):
+            return text
+    return ""
+
+
+def extract_claude_last_user_raw(path: Path) -> str:
+    """Unclipped last real Claude user message (for ntm attribution matching)."""
+    for line in reversed(_tail_lines(path)):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "user":
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        text = _first_text_block(msg.get("content"))
+        if text.strip() and not _is_boilerplate(text):
+            return text
+    return ""
+
+
 def extract_uuid_from_name(name: str) -> Optional[str]:
     m = UUID_RE.search(name)
     return m.group(0) if m else None
@@ -408,7 +686,25 @@ def is_codex_subagent(meta_payload: dict) -> bool:
     return False
 
 
-def discover_codex(sessions_root: Path, since_mtime: float) -> List[Session]:
+def codex_resume_cmd(resume_id: str, model: str, effort: str) -> str:
+    cmd = f"cod resume {resume_id}"
+    if model:
+        cmd += f" -m {model}"
+    if effort:
+        cmd += f" -c model_reasoning_effort={effort}"
+    return cmd
+
+
+def claude_resume_cmd(resume_id: str, model: str) -> str:
+    cmd = f"cc --resume {resume_id}"
+    if model:
+        cmd += f" --model {model}"
+    return cmd
+
+
+def discover_codex(
+    sessions_root: Path, since_mtime: float, ntm_markers: Optional[NtmMarkers] = None
+) -> List[Session]:
     out: List[Session] = []
     if not sessions_root.is_dir():
         return out
@@ -455,6 +751,11 @@ def discover_codex(sessions_root: Path, since_mtime: float) -> List[Session]:
         title_bits.append(Path(cwd).name or cwd)
         title = " · ".join(title_bits)
         preview = extract_codex_last_user(path)
+        model, effort = extract_codex_model(path)
+        ntm = bool(ntm_markers) and is_ntm_session(
+            ntm_markers, "codex", resume_id, cwd, model,
+            (extract_codex_first_user_raw(path), extract_codex_last_user_raw(path)),
+        )
 
         out.append(
             Session(
@@ -464,16 +765,21 @@ def discover_codex(sessions_root: Path, since_mtime: float) -> List[Session]:
                 mtime=st.st_mtime,
                 path=str(path),
                 title=title,
-                resume_cmd=f"cod resume {resume_id}",
+                resume_cmd=codex_resume_cmd(resume_id, model, effort),
                 is_subagent=sub,
                 started_hint=str(payload.get("timestamp") or ""),
                 preview=preview,
+                model=model,
+                effort=effort,
+                is_ntm=ntm,
             )
         )
     return out
 
 
-def discover_claude(projects_root: Path, since_mtime: float) -> List[Session]:
+def discover_claude(
+    projects_root: Path, since_mtime: float, ntm_markers: Optional[NtmMarkers] = None
+) -> List[Session]:
     """Top-level Claude sessions: <projects_root>/<project-dir>/<uuid>.jsonl only."""
     out: List[Session] = []
     if not projects_root.is_dir():
@@ -517,6 +823,11 @@ def discover_claude(projects_root: Path, since_mtime: float) -> List[Session]:
                     cwd = str(Path.home() / "projects")
 
             title, preview = extract_claude_identity(path)
+            model = extract_claude_model(path)
+            ntm = bool(ntm_markers) and is_ntm_session(
+                ntm_markers, "claude", sid, cwd, model,
+                (extract_claude_first_user_raw(path), extract_claude_last_user_raw(path)),
+            )
             out.append(
                 Session(
                     provider="claude",
@@ -525,9 +836,11 @@ def discover_claude(projects_root: Path, since_mtime: float) -> List[Session]:
                     mtime=st.st_mtime,
                     path=str(path),
                     title=title or Path(cwd).name or cwd,
-                    resume_cmd=f"cc --resume {sid}",
+                    resume_cmd=claude_resume_cmd(sid, model),
                     is_subagent=False,
                     preview=preview,
+                    model=model,
+                    is_ntm=ntm,
                 )
             )
     return out
@@ -646,6 +959,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Include Codex subagent threads (usually noise)",
     )
     ap.add_argument(
+        "--include-ntm",
+        action="store_true",
+        help="Include sessions spawned by ntm tmux swarms (excluded by default)",
+    )
+    ap.add_argument(
+        "--ntm-history",
+        default=os.environ.get("PFR_NTM_HISTORY") or str(DEFAULT_NTM_HISTORY),
+        help="ntm send-history JSONL used to detect ntm-spawned sessions",
+    )
+    ap.add_argument(
+        "--ntm-data",
+        default=os.environ.get("PFR_NTM_DATA") or str(DEFAULT_NTM_DATA),
+        help="ntm data dir holding manifests/ and checkpoints/ (attribution)",
+    )
+    ap.add_argument(
         "--providers",
         default="codex,claude",
         help="Comma list: codex,claude",
@@ -727,14 +1055,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         eprint("error: no valid providers (use codex and/or claude)")
         return 2
 
+    # ntm sessions are only attributed (and excluded) when not opted back in;
+    # skipping the load also skips the per-session user-message extraction.
+    ntm_markers: Optional[NtmMarkers] = None
+    if not args.include_ntm:
+        ntm_markers = load_ntm_markers(Path(args.ntm_history), Path(args.ntm_data))
+
     sessions: List[Session] = []
     if "codex" in providers:
-        sessions.extend(discover_codex(Path(args.codex_root), since))
+        sessions.extend(discover_codex(Path(args.codex_root), since, ntm_markers))
     if "claude" in providers:
-        sessions.extend(discover_claude(Path(args.claude_root), since))
+        sessions.extend(discover_claude(Path(args.claude_root), since, ntm_markers))
 
     if not args.include_subagents:
         sessions = [s for s in sessions if not s.is_subagent]
+
+    skipped_ntm = 0
+    if not args.include_ntm:
+        ntm_sessions = [s for s in sessions if s.is_ntm]
+        skipped_ntm = len(ntm_sessions)
+        sessions = [s for s in sessions if not s.is_ntm]
 
     sessions = dedupe_sessions(sessions)
 
@@ -878,6 +1218,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "lookback_hours": args.lookback_hours,
         "total_candidates_scanned": total_candidates,
         "skipped_running": skipped_running,
+        "skipped_ntm": skipped_ntm,
         "sessions": [asdict(s) for s in cluster],
         "session_count": len(cluster),
     }

@@ -26,10 +26,14 @@ LIVE_COD="$SD/cod"
 printf '#!/usr/bin/env bash\nsleep 30\n' > "$LIVE_COD"
 chmod 700 "$LIVE_COD"
 
-driver_out="$(osascript "$UI" "$SD" "exec \"$LIVE_COD\" resume $SID" tab 0 0.55)" \
+# Batch protocol: mode, settle, delay, shell, then <cwd> <cmd> pairs. The
+# command runs directly via the surface `command` property — this asserts the
+# command actually EXECUTES (the old typed path left it unsubmitted).
+driver_out="$(osascript "$UI" tab 0.55 0.1 "${SHELL:-/bin/zsh}" \
+  "$SD" "exec \"$LIVE_COD\" resume $SID")" \
   || fail "UI driver did not open fixture session"
 case "$driver_out" in
-  native|fallback) ;;
+  ok|"ok fallback") ;;
   *) fail "unexpected UI driver result: $driver_out" ;;
 esac
 

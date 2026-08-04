@@ -41,6 +41,9 @@ A power cut leaves a forensic signature: every process that was mid-write stops 
 | Post-open verification | Polls `ps` for resume evidence, writes `last-report.json`, exits non-zero on silent failures |
 | Tab order | Live status-log tab, agent-mail tab, hub projects, then the rest |
 | Titles + previews | Each session shows its title and first user message, so you know what you're resuming |
+| Model-matched resume | Each session resumes with its recorded model and reasoning effort (`-m` / `--model` pinned), so Codex never warns about a model mismatch |
+| ntm-aware | Sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms are excluded by default (matched against ntm's send history); `--include-ntm` overrides |
+| Fast bulk open | All tabs open in one scripting call, each running its resume command directly — no typing, no per-tab settle |
 | Doctor | `pfr --doctor` catches missing permissions and dependencies before they waste a recovery |
 | Offline tests | 15 suites against generated fixtures, including an install→run e2e through the real installer and launcher; no Ghostty, network, or live agents needed |
 
@@ -164,6 +167,9 @@ Ghostty, even if launch flags such as `-y` are also present. macOS uses
 | `--providers LIST` | `codex`, `claude`, or both |
 | `--projects-only` | Restrict to `~/projects/...` |
 | `--include-subagents` | Keep Codex subagent threads |
+| `--include-ntm` | Keep sessions spawned by [ntm](https://github.com/Dicklesworthstone/ntm) tmux swarms (excluded by default — ntm owns their recovery) |
+| `--ntm-history PATH` | ntm send-history JSONL used for attribution (default `~/.local/share/ntm/history.jsonl`) |
+| `--ntm-data DIR` | ntm data dir holding `manifests/` and `checkpoints/` used for attribution (default `~/.local/share/ntm`) |
 | `--force-reopen` | Include sessions that already look live |
 | `--limit N` | Cap listed/opened sessions (confidence still uses the full pocket) |
 | `--json` | Machine-readable discovery output |
@@ -210,6 +216,7 @@ Ghostty, even if launch flags such as `-y` are also present. macOS uses
 | `PFR_WINDOW`, `PFR_LOOKBACK_HOURS`, `PFR_PRE_BOOT_LOOKBACK`, `PFR_PROVIDERS` | Discovery defaults |
 | `PFR_OPEN_MODE`, `PFR_DRIVER`, `PFR_DELAY`, `PFR_SETTLE`, `PFR_MAX_OPEN` | Launch defaults |
 | `CODEX_HOME`, `CLAUDE_HOME` | Relocated agent state dirs |
+| `PFR_NTM_HISTORY`, `PFR_NTM_DATA` | ntm records used for ntm-session attribution |
 | `PFR_STATE_DIR` / `XDG_STATE_HOME` | Plan/report/run-log location |
 | `PFR_CODEX_ROOT`, `PFR_CLAUDE_ROOT`, `PFR_PS_FILE`, `PFR_FAKE_BOOT` | Same as isolation flags |
 | `PFR_VERIFY=0` / `PFR_VERIFY_TIMEOUT` | Skip / tune verification (default 15s) |
@@ -262,19 +269,18 @@ Titles and previews: Claude sessions prefer `custom-title`, then `ai-title`, the
 The same commands you would type yourself:
 
 ```bash
-cd ~/projects/frankensim
-cod resume 019fa4a7-3665-7aa3-8633-2a47c42c1d78
+cod resume 019fa4a7-3665-7aa3-8633-2a47c42c1d78 -m gpt-5.6-terra -c model_reasoning_effort=high
 
-cc --resume ba9de0d5-51bb-40f8-9029-8ea3bcfc3481
+cc --resume ba9de0d5-51bb-40f8-9029-8ea3bcfc3481 --model claude-fable-5
 ```
 
-They run in a real interactive shell, so `cod` / `cc` aliases and their flags apply.
+They run in a real interactive login shell (working directory preset per tab), so `cod` / `cc` aliases and their flags apply. The model and reasoning effort recorded in each session's transcript are pinned explicitly, so a session recorded with one model never silently resumes with another.
 
 ### Ghostty open drivers
 
-**`ui` (macOS default).** Launch Ghostty if needed; each session gets a new dedicated tab (never the default/restored tab) with its working directory set, then `input text` types the resume line, with one retry if the shell is still starting. If scripting fails entirely: System Events fallback (`⌘T` / paste / Return). If a tab was already created and only the input failed, the fallback pastes into the front tab without opening a second one. Needs Automation for Ghostty; the keystroke fallback also needs Accessibility. Leave the keyboard alone while a run is in progress.
+**`ui` (macOS default).** One osascript invocation opens every tab in the batch. Each session gets a dedicated tab (never the default/restored tab) whose surface **runs the resume command directly** in an interactive login shell (`$SHELL -il -c '<resume>; exec $SHELL -il'`) — nothing is typed at a prompt, so submission cannot race shell startup or die in zsh's bracketed paste, and your aliases still apply. When the agent exits the tab drops back to a fresh interactive shell. If native surface creation fails for a session: System Events fallback (`⌘T` / paste / Return), which needs Accessibility. Automation for Ghostty is required either way.
 
-**`api` (macOS).** Same surface API without the keystroke fallback. Automation required.
+**`api` (macOS).** Same batch command-launch without the keystroke fallback. Automation required.
 
 **`ghostty` (Linux).** One `ghostty` CLI window per session with `--working-directory` and an interactive shell running the resume command. `--tabs` becomes `--windows`: the CLI cannot address an existing window's tabs.
 
@@ -348,9 +354,10 @@ power_failure_resumer/
 | All sessions already live | Expected if you already resumed them; `--force-reopen` to reopen anyway |
 | Too many sessions | `--projects-only`, `--providers codex`, or `--pick` |
 | `low` confidence warning | The dense pocket may not be a crash; review before opening |
-| Keystrokes go nowhere (macOS) | Grant Accessibility; do not type mid-run; larger `--settle` / `--delay` |
-| Tab opens a bare shell | Press ↑, or re-run with a larger `--settle` |
-| Verify failed / not in `ps` | The resume likely never executed in that tab; larger `--settle` |
+| Keystrokes go nowhere (macOS fallback) | Grant Accessibility; do not type while the fallback is running; larger `--settle` |
+| Tab opens a bare shell | Native launch failed and the fallback pasted nothing — check Automation/Accessibility, re-run |
+| Verify failed / not in `ps` | The resume likely never executed in that tab; check the tab and re-run for that session |
+| Wrong sessions excluded as ntm | `--include-ntm`, or point `--ntm-history` at the right file |
 | `cod` / `cc` not found in tab | Confirm the aliases work in a normal Ghostty tab (`.zshrc`) |
 | AppleScript errors | System Settings → Privacy → Automation: allow your terminal → Ghostty |
 | Stale plan refused | Rediscover, or `--force-stale-plan` |

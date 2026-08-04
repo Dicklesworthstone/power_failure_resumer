@@ -53,6 +53,9 @@ ORDERED_FILE=""
 MAP_FILE=""
 PROJECTS_ONLY=0
 INCLUDE_SUBAGENTS=0
+INCLUDE_NTM=0
+NTM_HISTORY="${PFR_NTM_HISTORY:-}"    # override the ntm send-history path (tests)
+NTM_DATA="${PFR_NTM_DATA:-}"          # override the ntm data dir (manifests/checkpoints)
 FORCE_REOPEN=0
 DRY_RUN=0
 YES=0
@@ -81,6 +84,11 @@ DISCOVERY:
   --providers LIST      codex,claude (default: both)
   --projects-only       Only sessions whose cwd is under ~/projects
   --include-subagents   Include Codex subagent threads (noisy)
+  --include-ntm         Include sessions spawned by ntm tmux swarms (excluded by default)
+  --ntm-history PATH    ntm send-history file used to detect ntm-spawned sessions
+                        (default: ~/.local/share/ntm/history.jsonl; or PFR_NTM_HISTORY)
+  --ntm-data DIR        ntm data dir holding manifests/ and checkpoints/ used for
+                        attribution (default: ~/.local/share/ntm; or PFR_NTM_DATA)
   --force-reopen        Offer sessions even if a live process already resumed them
   --limit N             Cap listed/opened sessions (keeps newest)
   --json                Print discovery JSON and exit
@@ -260,38 +268,17 @@ ensure_ghostty() {
   die "Ghostty did not become ready"
 }
 
-open_one_api() {
-  local cwd="$1"
-  local resume_cmd="$2"
-  osascript "$OPEN_API_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "$SETTLE_SECONDS" >/dev/null
-}
+# The macOS drivers open every queued surface in ONE osascript invocation.
+# Each surface RUNS its command via the Ghostty surface `command` property in
+# an interactive login shell (aliases apply) — nothing is typed at a prompt,
+# so submission cannot race shell startup or die in bracketed paste.
+# queue_open() collects entries; flush_opens() launches and reports per entry.
+OPEN_CWDS=()
+OPEN_CMDS=()
 
-open_one_ghostty() {
+# Resolve a launch cwd, falling back like the old per-open path did.
+resolved_cwd() {
   local cwd="$1"
-  local resume_cmd="$2"
-  # Linux: no scripting API — spawn one window per session via the ghostty CLI.
-  # Interactive shell (-i) so cod/cc aliases from rc files resolve.
-  # resume_cmd is reconstructed from provider + validated UUID at the JSON/TSV
-  # boundary. Escaping the whole string with %q would turn it into one command
-  # name containing spaces instead of a command plus arguments.
-  nohup ghostty --working-directory="$cwd" \
-    -e "${SHELL:-/bin/sh}" -ic "$resume_cmd" >/dev/null 2>&1 &
-  disown 2>/dev/null || true
-}
-
-open_one_ui() {
-  local cwd="$1"
-  local resume_cmd="$2"
-  # Always open a dedicated tab/window (is_first=0). Reusing the default tab on a
-  # "fresh" launch was unsafe when Ghostty restores windows or already had content.
-  # is_first arg kept for AppleScript compatibility (ignored for creation).
-  osascript "$OPEN_UI_AS" "$cwd" "$resume_cmd" "$OPEN_MODE" "0" "$SETTLE_SECONDS" >/dev/null
-}
-
-open_one() {
-  local cwd="$1"
-  local resume_cmd="$2"
-
   if [[ ! -d "$cwd" ]]; then
     warn "cwd missing, falling back to ~/projects: $cwd"
     cwd="${HOME}/projects"
@@ -300,16 +287,73 @@ open_one() {
       warn "\$HOME/projects also missing; using \$HOME"
     fi
   fi
+  printf '%s\n' "$cwd"
+}
 
+queue_open() {
+  local cwd resume_cmd="$2"
+  cwd="$(resolved_cwd "$1")"
   if (( DRY_RUN )); then
     printf '  DRY  cd %q && %s\n' "$cwd" "$resume_cmd"
+  fi
+  OPEN_CWDS+=("$cwd")
+  OPEN_CMDS+=("$resume_cmd")
+}
+
+open_batch_ghostty() {
+  # Linux: no scripting API — spawn one window per session via the ghostty CLI.
+  # Interactive shell (-i) so cod/cc aliases from rc files resolve.
+  # Commands are reconstructed from provider + validated UUID at the JSON/TSV
+  # boundary. Escaping the whole string with %q would turn it into one command
+  # name containing spaces instead of a command plus arguments.
+  local idx
+  BATCH_RESULTS=()
+  for idx in "${!OPEN_CWDS[@]}"; do
+    nohup ghostty --working-directory="${OPEN_CWDS[$idx]}" \
+      -e "${SHELL:-/bin/sh}" -ic "${OPEN_CMDS[$idx]}" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    # Spawn is asynchronous; launch failures surface through post-open verify.
+    BATCH_RESULTS+=("ok")
+    if [[ "$idx" -lt $(( ${#OPEN_CWDS[@]} - 1 )) ]]; then
+      sleep "$DELAY_SECONDS"
+    fi
+  done
+}
+
+open_batch_osascript() {
+  local script="$1" out idx
+  local -a args=("$OPEN_MODE" "$SETTLE_SECONDS" "$DELAY_SECONDS" "${SHELL:-/bin/zsh}")
+  for idx in "${!OPEN_CWDS[@]}"; do
+    args+=("${OPEN_CWDS[$idx]}" "${OPEN_CMDS[$idx]}")
+  done
+  BATCH_RESULTS=()
+  if out="$(osascript "$script" "${args[@]}")"; then
+    while IFS= read -r line; do
+      BATCH_RESULTS+=("$line")
+    done <<< "$out"
+  fi
+  # Pad so a truncated or failed batch reports every remaining entry as failed.
+  while [[ "${#BATCH_RESULTS[@]}" -lt "${#OPEN_CWDS[@]}" ]]; do
+    BATCH_RESULTS+=("fail no result from batch open")
+  done
+}
+
+# Launch all queued surfaces. Results land in BATCH_RESULTS (index-aligned
+# with the queue): "ok", "ok fallback", or "fail <reason>".
+flush_opens() {
+  BATCH_RESULTS=()
+  [[ "${#OPEN_CWDS[@]}" -eq 0 ]] && return 0
+  if (( DRY_RUN )); then
+    local idx
+    for idx in "${!OPEN_CWDS[@]}"; do
+      BATCH_RESULTS+=("ok")
+    done
     return 0
   fi
-
   case "$DRIVER" in
-    ui)      open_one_ui      "$cwd" "$resume_cmd" ;;
-    api)     open_one_api     "$cwd" "$resume_cmd" ;;
-    ghostty) open_one_ghostty "$cwd" "$resume_cmd" ;;
+    ui)      open_batch_osascript "$OPEN_UI_AS" ;;
+    api)     open_batch_osascript "$OPEN_API_AS" ;;
+    ghostty) open_batch_ghostty ;;
     *)       die "unknown driver: $DRIVER (use ui, api, or ghostty)" ;;
   esac
 }
@@ -324,6 +368,9 @@ while [[ $# -gt 0 ]]; do
     --providers) need_arg "$@"; PROVIDERS="$2"; shift 2 ;;
     --projects-only) PROJECTS_ONLY=1; shift ;;
     --include-subagents) INCLUDE_SUBAGENTS=1; shift ;;
+    --include-ntm) INCLUDE_NTM=1; shift ;;
+    --ntm-history) need_arg "$@"; NTM_HISTORY="$2"; shift 2 ;;
+    --ntm-data) need_arg "$@"; NTM_DATA="$2"; shift 2 ;;
     --force-reopen) FORCE_REOPEN=1; shift ;;
     --codex-root) need_arg "$@"; CODEX_ROOT="$2"; shift 2 ;;
     --claude-root) need_arg "$@"; CLAUDE_ROOT="$2"; shift 2 ;;
@@ -486,6 +533,10 @@ doctor_run() {
   else
     add_check agent_mail warn "am not found — no agent-mail tab (optional)"
   fi
+  local ntm_hist="${NTM_HISTORY:-$HOME/.local/share/ntm/history.jsonl}"
+  if [[ -f "$ntm_hist" ]]; then
+    add_check ntm_history ok "$ntm_hist — ntm-spawned sessions excluded (--include-ntm to keep)"
+  fi
   # Probe the user's login shell (the same kind resume tabs run in), with a
   # hard time bound: a hung rc file must not hang the doctor.
   local agent_cmds probe_shell probe_rc
@@ -562,12 +613,13 @@ if (( ! NOTIFY )); then
   require_number "--settle" "$SETTLE_SECONDS"
   require_uint "--max" "$MAX_OPEN"
 
-  # Per-driver default inter-session delay if user did not set one
+  # Per-driver default inter-surface delay if user did not set one. The macOS
+  # drivers launch commands directly (no typing), so tabs can open fast.
   if [[ -z "$DELAY_SECONDS" ]]; then
-    if [[ "$DRIVER" == "ui" ]]; then
-      DELAY_SECONDS="0.80"
-    else
+    if [[ "$DRIVER" == "ghostty" ]]; then
       DELAY_SECONDS="0.35"
+    else
+      DELAY_SECONDS="0.10"
     fi
   fi
   require_number "--delay" "$DELAY_SECONDS"
@@ -598,6 +650,15 @@ if (( PROJECTS_ONLY )); then
 fi
 if (( INCLUDE_SUBAGENTS )); then
   discover_args+=(--include-subagents)
+fi
+if (( INCLUDE_NTM )); then
+  discover_args+=(--include-ntm)
+fi
+if [[ -n "$NTM_HISTORY" ]]; then
+  discover_args+=(--ntm-history "$NTM_HISTORY")
+fi
+if [[ -n "$NTM_DATA" ]]; then
+  discover_args+=(--ntm-data "$NTM_DATA")
 fi
 if (( FORCE_REOPEN )); then
   discover_args+=(--force-reopen)
@@ -788,7 +849,26 @@ for index, s in enumerate(sessions):
     if not isinstance(cwd, str) or not cwd.startswith("/"):
         print(f"invalid session cwd at index {index}: {cwd!r}", file=sys.stderr)
         sys.exit(1)
-    resume_cmd = f"cod resume {sid}" if provider == "codex" else f"cc --resume {sid}"
+    # Model/effort are authority-bearing (joined into the resume command), so
+    # they pass the same strict validation here as in discover.py and plan.py.
+    model = s.get("model") or ""
+    effort = s.get("effort") or ""
+    if not isinstance(model, str) or (model and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", model)):
+        print(f"invalid session model at index {index}: {model!r}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(effort, str) or (effort and not re.fullmatch(r"[a-z]{1,16}", effort)):
+        print(f"invalid session effort at index {index}: {effort!r}", file=sys.stderr)
+        sys.exit(1)
+    if provider == "codex":
+        resume_cmd = f"cod resume {sid}"
+        if model:
+            resume_cmd += f" -m {model}"
+        if effort:
+            resume_cmd += f" -c model_reasoning_effort={effort}"
+    else:
+        resume_cmd = f"cc --resume {sid}"
+        if model:
+            resume_cmd += f" --model {model}"
     try:
         dt = datetime.fromtimestamp(float(s["mtime"]))
     except (KeyError, TypeError, ValueError, OverflowError, OSError) as e:
@@ -807,6 +887,8 @@ for index, s in enumerate(sessions):
                 resume_cmd,
                 clean(s.get("title") or ""),
                 clean(s.get("preview") or ""),
+                clean(model),
+                clean(effort),
             ]
         )
     )
@@ -824,6 +906,7 @@ print(clean(data.get("skipped_running") or 0))
 print(clean(data.get("confidence") or "unknown"))
 reasons = data.get("confidence_reasons") or []
 print(clean(", ".join(str(reason) for reason in reasons)))
+print(clean(data.get("skipped_ntm") or 0))
 PY
 )"
 
@@ -835,6 +918,7 @@ SCANNED="$(printf '%s\n' "$META" | sed -n '5p')"
 SKIPPED_RUNNING="$(printf '%s\n' "$META" | sed -n '6p')"
 CONFIDENCE="$(printf '%s\n' "$META" | sed -n '7p')"
 CONF_REASONS="$(printf '%s\n' "$META" | sed -n '8p')"
+SKIPPED_NTM="$(printf '%s\n' "$META" | sed -n '9p')"
 
 echo
 log "boot time:     ${BOOT}"
@@ -847,6 +931,9 @@ if [[ "$CONFIDENCE" == "low" ]]; then
 fi
 if [[ "${SKIPPED_RUNNING:-0}" != "0" ]]; then
   log "skipped:       ${SKIPPED_RUNNING} already-running session(s)  (--force-reopen to include)"
+fi
+if [[ "${SKIPPED_NTM:-0}" != "0" ]]; then
+  log "skipped:       ${SKIPPED_NTM} ntm-spawned session(s)  (--include-ntm to include)"
 fi
 echo
 
@@ -868,7 +955,7 @@ fi
 
 printf '%s\n' "──── sessions to resume ────"
 n=0
-while IFS=$'\t' read -r provider sid cwd mt resume_cmd title preview || [[ -n "${provider:-}" ]]; do
+while IFS=$'\t' read -r provider sid cwd mt resume_cmd title preview model effort || [[ -n "${provider:-}" ]]; do
   [[ -z "${provider:-}" ]] && continue
   n=$((n + 1))
   short_cwd="${cwd/#$HOME/~}"
@@ -994,13 +1081,20 @@ if (( ! DRY_RUN )) && [[ "$DRIVER" != "ghostty" ]]; then
   ensure_ghostty   # ghostty CLI driver spawns its own windows; no pre-launch needed
 fi
 
+# All surfaces (status tab, agent-mail, sessions) are queued and opened in a
+# single batch: on macOS one osascript invocation opens every tab, each
+# running its command directly. Queue order is tab order.
+
 # Tab 1 — live status: a Ghostty tab tailing this run's formatted log so the
 # whole resume is observable as it happens. Disable with PFR_STATUS_TAB=0.
+STATUS_QUEUED=0
+AM_QUEUED=0
 if [[ "${PFR_STATUS_TAB:-1}" != "0" ]]; then
   RUN_LOG="${STATE_DIR}/run-$(date +%Y%m%d_%H%M%S)-$$.log"
   if (( DRY_RUN )); then
     status_cmd="$(printf 'tail -n +1 -f %q' "$RUN_LOG")"
-    open_one "$HOME" "$status_cmd"
+    queue_open "$HOME" "$status_cmd"
+    STATUS_QUEUED=1
     RUN_LOG=""
   elif mkdir -p "$STATE_DIR" 2>/dev/null \
       && chmod 700 "$STATE_DIR" 2>/dev/null \
@@ -1013,9 +1107,8 @@ if [[ "${PFR_STATUS_TAB:-1}" != "0" ]]; then
     run_log_header
     log "run log: ${RUN_LOG}"
     status_cmd="$(printf 'tail -n +1 -f %q' "$RUN_LOG")"
-    log "opening status tab (live run log) first…"
-    open_one "$HOME" "$status_cmd" || warn "failed to open status tab"
-    sleep "$DELAY_SECONDS"
+    queue_open "$HOME" "$status_cmd"
+    STATUS_QUEUED=1
   else
     RUN_LOG=""
   fi
@@ -1025,13 +1118,8 @@ fi
 # Disable with PFR_AM=0; PFR_AM_BIN overrides the binary (tests).
 AM_BIN="${PFR_AM_BIN:-am}"
 if [[ "${PFR_AM:-1}" != "0" && -n "$AM_BIN" ]] && command -v "$AM_BIN" >/dev/null 2>&1; then
-  if (( DRY_RUN )); then
-    open_one "$HOME" "$AM_BIN"
-  else
-    log "opening agent-mail tab (${AM_BIN})…"
-    open_one "$HOME" "$AM_BIN" || warn "failed to open agent-mail tab"
-    sleep "$DELAY_SECONDS"
-  fi
+  queue_open "$HOME" "$AM_BIN"
+  AM_QUEUED=1
 fi
 
 if (( DRY_RUN )); then
@@ -1039,30 +1127,53 @@ if (( DRY_RUN )); then
 else
   log "opening ${SEL_COUNT} Ghostty ${OPEN_MODE}(s) via driver=${DRIVER}…"
   if [[ "$DRIVER" == "ui" ]]; then
-    log "Prefer native Ghostty scripting; keystroke fallback needs Accessibility."
-    log "Do not type in Ghostty until this finishes."
+    log "Commands launch directly in each tab; keystroke fallback needs Accessibility."
   fi
 fi
 
 ATTEMPTS_FILE="$(tmpfile)"
+SESSION_PROVIDERS=()
+SESSION_SIDS=()
+SESSION_CWDS=()
 i=0
-while IFS=$'\t' read -r provider sid cwd mt resume_cmd title preview || [[ -n "${provider:-}" ]]; do
+# shellcheck disable=SC2034  # model/effort terminate the TSV record; resume_cmd already carries them
+while IFS=$'\t' read -r provider sid cwd mt resume_cmd title preview model effort || [[ -n "${provider:-}" ]]; do
   [[ -z "${provider:-}" ]] && continue
   i=$((i + 1))
   short_cwd="${cwd/#$HOME/~}"
   printf '  [%d/%d] %s  %s\n' "$i" "$SEL_COUNT" "$provider" "$short_cwd"
-  if open_one "$cwd" "$resume_cmd"; then
+  queue_open "$cwd" "$resume_cmd"
+  SESSION_PROVIDERS+=("$provider")
+  SESSION_SIDS+=("$sid")
+  SESSION_CWDS+=("$cwd")
+done < "$ORDERED_FILE"
+
+flush_opens
+
+# Map batch results back: entries before the sessions are status/agent-mail.
+PRE_COUNT=$((STATUS_QUEUED + AM_QUEUED))
+if (( ! DRY_RUN )); then
+  if (( STATUS_QUEUED )) && [[ "${BATCH_RESULTS[0]}" == fail* ]]; then
+    warn "failed to open status tab (${BATCH_RESULTS[0]#fail })"
+  fi
+  if (( AM_QUEUED )) && [[ "${BATCH_RESULTS[$STATUS_QUEUED]}" == fail* ]]; then
+    warn "failed to open agent-mail tab (${BATCH_RESULTS[$STATUS_QUEUED]#fail })"
+  fi
+fi
+for idx in "${!SESSION_SIDS[@]}"; do
+  result="${BATCH_RESULTS[$((PRE_COUNT + idx))]:-fail missing result}"
+  provider="${SESSION_PROVIDERS[$idx]}"
+  sid="${SESSION_SIDS[$idx]}"
+  cwd="${SESSION_CWDS[$idx]}"
+  if [[ "$result" == ok* ]]; then
     OPEN_OKS=$((OPEN_OKS + 1))
     printf '%s\t%s\t%s\t1\n' "$provider" "$sid" "$cwd" >> "$ATTEMPTS_FILE"
   else
     OPEN_FAILS=$((OPEN_FAILS + 1))
     printf '%s\t%s\t%s\t0\n' "$provider" "$sid" "$cwd" >> "$ATTEMPTS_FILE"
-    warn "failed to open: $provider $sid ($short_cwd)"
+    warn "failed to open: $provider $sid (${cwd/#$HOME/~}): ${result#fail }"
   fi
-  if (( ! DRY_RUN )) && [[ "$i" -lt "$SEL_COUNT" ]]; then
-    sleep "$DELAY_SECONDS"
-  fi
-done < "$ORDERED_FILE"
+done
 
 echo
 if (( DRY_RUN )); then

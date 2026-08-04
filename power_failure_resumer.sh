@@ -1204,7 +1204,7 @@ else
       log "report:        ${STATE_DIR}/last-report.json"
       if [[ -n "$UNVERIFIED" ]]; then
         warn "no process evidence for: ${UNVERIFIED}"
-        warn "check those tabs — the resume command may not have executed (try larger --settle)."
+        warn "check those tabs — the resume command may have failed (cod/cc missing, or the agent exited early)."
       fi
     fi
   fi
@@ -1216,5 +1216,5 @@ else
   if (( VERIFY_RC != 0 )); then
     exit 1
   fi
-  log "tip: if a tab only shows a shell, press Up or re-run with a larger --settle."
+  log "tip: a tab showing a bare shell means its resume command exited — check that tab, then re-run with --pick."
 fi

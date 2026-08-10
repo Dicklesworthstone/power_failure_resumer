@@ -10,3 +10,17 @@ pfr_illustration.png
 
 # Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
 /beads_compliance_audit/
+
+# === multi-repo ephemeral patterns 2026-08-10 ===
+# Recoverable Beads write-lock snapshots moved aside when stale
+.beads/.write.lock.stale-*
+# Claude Code local session state (nothing tracked here)
+.claude/
+# Eidetic / NTM / Wrangler
+.ee/
+.ntm/
+.wrangler/
+.beads/beads.db-fsqlite-ns-*
+.repo_janitor_workspace/
+.skill-loop-progress.md
+.skill-loop-progress-*.md

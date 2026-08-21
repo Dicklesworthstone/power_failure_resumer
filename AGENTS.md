@@ -307,3 +307,5 @@ Before ending a code session:
 8. Report exact proof, residual limitations, commit hash, and push state.
 
 Never report a pass that the captured evidence does not establish.
+
+For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"

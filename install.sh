@@ -34,6 +34,11 @@ NO_GUM=0
 VERIFY=0
 INSTALL_SKILL=0
 OFFLINE=""
+# Legacy-launcher migration state (issue #1). Set by preflight, consumed by
+# ensure_launcher; both must agree before anything on disk is touched.
+MIGRATE_LEGACY_LAUNCHER=0
+LEGACY_LAUNCHER_SHA=""
+LEGACY_LAUNCHER_BACKUP=""
 
 usage() {
   cat <<'EOF'
@@ -174,6 +179,110 @@ case "$OS" in
   *) err "unsupported platform: $OS (need macOS or Linux)"; exit 1 ;;
 esac
 
+# ── legacy launcher migration ─────────────────────────────────────────
+# Older installs put a *copy* of the launcher at $BIN_DIR/pfr instead of the
+# managed symlink. The collision guard could not tell that copy apart from an
+# unrelated program of the same name, so a reinstall over a perfectly healthy
+# legacy install stopped at "refusing to replace unrelated path" (issue #1).
+#
+# Migration is allowed only for that exact shape, proven from evidence on disk:
+# a regular file whose bytes are identical to this install root's own launcher,
+# in an install root this installer owns. The previous file is never deleted --
+# it is moved to a timestamped backup next to it, and the path is reported, so
+# the migration can be undone by hand with a single mv.
+
+file_sha256() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+try:
+    print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+except OSError as exc:
+    raise SystemExit(f"cannot hash {sys.argv[1]}: {exc}")
+PY
+}
+
+# Records LEGACY_LAUNCHER_SHA on success. Returns 1 for anything that is not
+# provably a copy of this install's launcher.
+legacy_launcher_is_managed_copy() {
+  local link_path="$1"
+  local canonical="$PREFIX/power_failure_resumer.sh"
+  [[ "${PFR_INSTALLER_NO_LEGACY_MIGRATION:-0}" != "1" ]] || return 1
+  # A symlink, directory, socket or device is not the legacy shape.
+  [[ -f "$link_path" && ! -L "$link_path" ]] || return 1
+  [[ -f "$canonical" && ! -L "$canonical" ]] || return 1
+  # The install root must look like ours: either the ownership marker names
+  # this repository, or the tree carries the launcher and library layout.
+  if [[ -f "$PREFIX/.pfr-install" ]]; then
+    [[ "$(<"$PREFIX/.pfr-install")" == "$REPO_OWNER/$REPO_NAME" ]] || return 1
+  else
+    [[ -f "$PREFIX/lib/discover.py" ]] || return 1
+  fi
+  local link_sha canonical_sha
+  link_sha="$(file_sha256 "$link_path")" || return 1
+  canonical_sha="$(file_sha256 "$canonical")" || return 1
+  [[ -n "$link_sha" && "$link_sha" == "$canonical_sha" ]] || return 1
+  LEGACY_LAUNCHER_SHA="$link_sha"
+  return 0
+}
+
+# Moves the approved legacy launcher aside. Re-verifies the bytes preflight
+# approved so a file that changed in between is refused, not migrated.
+migrate_legacy_launcher() {
+  local link_path="$1"
+  if [[ "$MIGRATE_LEGACY_LAUNCHER" -ne 1 || -z "$LEGACY_LAUNCHER_SHA" ]]; then
+    err "refusing to replace unrelated path: $link_path"
+    return 1
+  fi
+  if [[ ! -f "$link_path" || -L "$link_path" ]]; then
+    err "refusing to replace unrelated path: $link_path"
+    return 1
+  fi
+  local current_sha backup stamp
+  current_sha="$(file_sha256 "$link_path")" || {
+    err "cannot hash the legacy launcher: $link_path"
+    return 1
+  }
+  if [[ "$current_sha" != "$LEGACY_LAUNCHER_SHA" ]]; then
+    err "legacy launcher changed after preflight; refusing to replace $link_path"
+    return 1
+  fi
+  stamp="$(date +%Y%m%d%H%M%S)"
+  backup="${link_path}.pfr-legacy.${stamp}.$$"
+  if [[ -e "$backup" || -L "$backup" ]]; then
+    err "legacy launcher backup path already exists: $backup"
+    return 1
+  fi
+  if ! mv "$link_path" "$backup"; then
+    err "could not move the legacy launcher aside: $link_path"
+    return 1
+  fi
+  LEGACY_LAUNCHER_BACKUP="$backup"
+  ok "migrated legacy launcher copy; previous file kept at $backup"
+  return 0
+}
+
+# Undo of the move above, used when the symlink could not be created. Never
+# overwrites whatever now occupies the launcher path.
+restore_legacy_launcher() {
+  local link_path="$1"
+  [[ -n "$LEGACY_LAUNCHER_BACKUP" && -f "$LEGACY_LAUNCHER_BACKUP" ]] || return 0
+  if [[ -e "$link_path" || -L "$link_path" ]]; then
+    warn "legacy launcher backup left at $LEGACY_LAUNCHER_BACKUP"
+    return 0
+  fi
+  if mv "$LEGACY_LAUNCHER_BACKUP" "$link_path"; then
+    warn "restored the legacy launcher at $link_path"
+    LEGACY_LAUNCHER_BACKUP=""
+  else
+    warn "legacy launcher backup left at $LEGACY_LAUNCHER_BACKUP"
+  fi
+  return 0
+}
+
 # ── preflight ───────────────────────────────────────────────────────────────
 preflight() {
   info "Running preflight checks"
@@ -222,8 +331,14 @@ preflight() {
   local link_path="$BIN_DIR/pfr"
   if [[ -e "$link_path" || -L "$link_path" ]]; then
     if [[ ! -L "$link_path" || "$(readlink "$link_path" 2>/dev/null || true)" != "$PREFIX/power_failure_resumer.sh" ]]; then
-      err "refusing to replace unrelated path: $link_path"
-      exit 1
+      if legacy_launcher_is_managed_copy "$link_path"; then
+        MIGRATE_LEGACY_LAUNCHER=1
+        info "legacy launcher at $link_path is a byte-identical copy of $PREFIX/power_failure_resumer.sh"
+        info "it will be kept as a timestamped backup and replaced with the managed symlink"
+      else
+        err "refusing to replace unrelated path: $link_path"
+        exit 1
+      fi
     fi
   fi
   if [[ -z "$OFFLINE" ]]; then
@@ -332,15 +447,19 @@ ensure_launcher() {
   if [[ -L "$link_path" && "$(readlink "$link_path" 2>/dev/null || true)" == "$PREFIX/power_failure_resumer.sh" ]]; then
     return 0
   fi
-  # preflight already rejects unrelated entries. Recheck here to narrow the
-  # race between validation and activation.
+  # preflight already rejects unrelated entries and approves at most one legacy
+  # launcher copy. Recheck here to narrow the race between validation and
+  # activation: migrate_legacy_launcher re-hashes the file before moving it and
+  # refuses anything preflight did not approve.
   if [[ -e "$link_path" || -L "$link_path" ]]; then
-    err "refusing to replace unrelated path: $link_path"
-    return 1
+    migrate_legacy_launcher "$link_path" || return 1
   fi
   # symlink(2) creates the directory entry atomically and fails if another
   # process won the race. A temp-link + mv would overwrite that new entry.
-  ln -s "$PREFIX/power_failure_resumer.sh" "$link_path"
+  if ! ln -s "$PREFIX/power_failure_resumer.sh" "$link_path"; then
+    restore_legacy_launcher "$link_path"
+    return 1
+  fi
 }
 
 install_tree() {
@@ -508,6 +627,9 @@ summary() {
     "                 pfr -y              # reopen everything"
     "uninstall paths: $PREFIX and $BIN_DIR/pfr"
   )
+  if [[ -n "$LEGACY_LAUNCHER_BACKUP" ]]; then
+    lines+=("legacy launcher: kept at $LEGACY_LAUNCHER_BACKUP (safe to remove)")
+  fi
   if use_gum; then
     gum style --border rounded --border-foreground 42 --padding "0 2" --margin "1 0" \
       "${lines[@]}"

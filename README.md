@@ -117,6 +117,8 @@ Installs to `~/.local/share/pfr` and symlinks `pfr` into `~/.local/bin`. Flags (
 
 The installer treats itself as a security boundary. Archives are validated before extraction (single top-level directory; no traversal, links, devices, or oversized members; macOS AppleDouble litter tolerated). It refuses to replace an install root or `pfr` launcher it does not own, stages the complete new tree before activating it, and keeps the previous tree until the launcher update succeeds so a failed upgrade rolls back. An unchanged tree short-circuits with "already up to date" (bytecode caches are ignored when comparing) while still repairing a missing launcher.
 
+One legacy layout is recognized rather than refused: older installs left a *copy* of the launcher at `~/.local/bin/pfr` instead of the managed symlink. When that file is byte-identical to the install root's own `power_failure_resumer.sh` and the root carries this project's ownership marker, the installer moves it to `~/.local/bin/pfr.pfr-legacy.<timestamp>.<pid>`, reports that path, and creates the symlink. The old file is preserved, never deleted, so the migration is reversible by hand. A launcher that is not byte-identical, a directory at that path, or an install root the installer does not own is still refused. Set `PFR_INSTALLER_NO_LEGACY_MIGRATION=1` to keep the strict refusal.
+
 **From a checkout:**
 
 ```bash
@@ -365,6 +367,7 @@ power_failure_resumer/
 | `cod` / `cc` not found in tab | Confirm the aliases work in a normal Ghostty tab (`.zshrc`) |
 | AppleScript errors | System Settings → Privacy → Automation: allow your terminal → Ghostty |
 | Stale plan refused | Rediscover, or `--force-stale-plan` |
+| Installer: `refusing to replace unrelated path: ~/.local/bin/pfr` | The file there is not a byte-identical copy of the install root's launcher. Compare both with `shasum -a 256`; if it is yours, move it aside and re-run |
 | Skip status / agent-mail tab | `PFR_STATUS_TAB=0` / `PFR_AM=0` |
 | Skip verification | `PFR_VERIFY=0` |
 

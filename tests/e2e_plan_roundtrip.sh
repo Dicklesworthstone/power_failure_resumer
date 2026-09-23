@@ -4,7 +4,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SD="$(new_state_dir pfr-e2e-plan)"
 
-ids_of() { grep -oE '(cod resume|cc --resume) [0-9a-f-]+' <<<"$1" | awk '{print $NF}' | sort; }
+ids_of() { grep -oE '((cod|codex) resume|(cc|claude) --resume) [0-9a-f-]+' <<<"$1" | awk '{print $NF}' | sort; }
 
 out1="$("$PFR" --dry-run "${FIX_ARGS[@]}" --state-dir "$SD" 2>&1)" || fail "discovery dry-run failed"
 [[ -f "$SD/last-plan.json" ]] || fail "last-plan.json not written"
@@ -20,7 +20,7 @@ assert_eq "$ids2" "$ids1" "plan reopens identical session set"
 # Full resume COMMANDS must survive the roundtrip too (pfr-model-plan
 # regression: the plan field whitelist dropped model/effort, so plan-loaded
 # resumes silently lost their -m / --model pinning).
-cmds_of() { grep -oE '(cod resume|cc --resume) [^(»]*' <<<"$1" | sed 's/[[:space:]]*$//' | sort; }
+cmds_of() { grep -oE '((cod|codex) resume|(cc|claude) --resume) [^(»]*' <<<"$1" | sed 's/[[:space:]]*$//' | sort; }
 assert_eq "$(cmds_of "$out2")" "$(cmds_of "$out1")" "plan preserves full resume commands"
 
 # Different boot ⇒ stale plan must refuse without --force-stale-plan

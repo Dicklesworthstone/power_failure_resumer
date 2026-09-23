@@ -89,7 +89,7 @@ assert_eq "$mode" "pre_boot" "installed --json mode"
 
 # ── plan roundtrip through the installed launcher ───────────────────────────
 log_phase plan_roundtrip
-ids_of() { grep -oE '(cod resume|cc --resume) [0-9a-f-]+' <<<"$1" | awk '{print $NF}' | sort; }
+ids_of() { grep -oE '((cod|codex) resume|(cc|claude) --resume) [0-9a-f-]+' <<<"$1" | awk '{print $NF}' | sort; }
 out1="$(run_pfr --dry-run "${FIX_ARGS[@]}" --state-dir "$SD" 2>&1)" \
   || fail "installed discovery for plan failed"
 out2="$(run_pfr --dry-run --last-plan --state-dir "$SD" --fake-boot "$FAKE_BOOT" 2>&1)" \

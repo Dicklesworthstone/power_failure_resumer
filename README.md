@@ -28,7 +28,7 @@ You run a fleet of local coding agents (Codex CLI and Claude Code) in Ghostty ta
 
 ### The Solution
 
-A power cut leaves a forensic signature: every process that was mid-write stops touching its session file at nearly the same wall-clock moment, just before the next boot time. `pfr` scans Codex and Claude Code session files, finds that simultaneous-death cluster, scores how likely it is to be a real crash, and reopens each victim in its own Ghostty tab. Every tab launches its resume command (`cod resume <id> -m <recorded-model>`) directly in an interactive login shell, so your aliases apply and each session comes back on the model it was actually using.
+A power cut leaves a forensic signature: every process that was mid-write stops touching its session file at nearly the same wall-clock moment, just before the next boot time. `pfr` scans Codex and Claude Code session files, finds that simultaneous-death cluster, scores how likely it is to be a real crash, and reopens each victim in its own Ghostty tab. Every tab launches its resume command (`codex resume <id> -m <recorded-model>`, or your `cod` alias when you have one) directly in an interactive login shell, so your aliases apply and each session comes back on the model it was actually using.
 
 ### Why use pfr?
 
@@ -275,12 +275,12 @@ Titles and previews: Claude sessions prefer `custom-title`, then `ai-title`, the
 The same commands you would type yourself:
 
 ```bash
-cod resume 019fa4a7-3665-7aa3-8633-2a47c42c1d78 -m gpt-5.6-terra -c model_reasoning_effort=high
+codex resume 019fa4a7-3665-7aa3-8633-2a47c42c1d78 -m gpt-5.6-terra -c model_reasoning_effort=high
 
-cc --resume ba9de0d5-51bb-40f8-9029-8ea3bcfc3481 --model claude-fable-5
+claude --resume ba9de0d5-51bb-40f8-9029-8ea3bcfc3481 --model claude-fable-5
 ```
 
-They run in a real interactive login shell (working directory preset per tab), so `cod` / `cc` aliases and their flags apply. The model and reasoning effort recorded in each session's transcript are pinned explicitly, so a session recorded with one model never silently resumes with another.
+They run in a real interactive login shell (working directory preset per tab). Commands start with the canonical `codex` / `claude` CLIs, so no shell setup is required. If your login shell defines `cod` or `cc` as an **alias or function**, `pfr` uses that name instead so your usual flags apply; a plain `cc` executable (the system C compiler) is never mistaken for Claude. Set `PFR_CODEX_CMD` / `PFR_CLAUDE_CMD` to a command name or absolute path to choose explicitly (this also skips the shell probe). The model and reasoning effort recorded in each session's transcript are pinned explicitly, so a session recorded with one model never silently resumes with another.
 
 ### Ghostty open drivers
 
@@ -310,7 +310,7 @@ Plan load refuses a plan from a different boot, older than 24h, or timestamped m
 
 ### Doctor
 
-`pfr --doctor` checks python3, core libs, writable state dir, session roots, and the platform's Ghostty hooks (Ghostty.app, osascript, and an Automation probe on macOS; the `ghostty` CLI on Linux). It also confirms the `cod` and `cc` commands resolve in a login zsh (the same kind of shell resume commands run in), notes when ntm records are present (so you know ntm-spawned sessions will be excluded), and reports optional extras (`fzf`, `am`). Exit 0 when healthy; `--json` for automation.
+`pfr --doctor` checks python3, core libs, writable state dir, session roots, and the platform's Ghostty hooks (Ghostty.app, osascript, and an Automation probe on macOS; the `ghostty` CLI on Linux). It also reports which command each provider's resumes will start with (`cod`/`cc` alias or function, otherwise `codex`/`claude`) and whether it resolves in your login shell (the same kind of shell resume commands run in), notes when ntm records are present (so you know ntm-spawned sessions will be excluded), and reports optional extras (`fzf`, `am`). Exit 0 when healthy; `--json` for automation.
 
 ## Agent skill
 
@@ -364,7 +364,7 @@ power_failure_resumer/
 | Tab opens a bare shell | Native launch failed and the fallback pasted nothing; check Automation/Accessibility, then re-run |
 | Verify failed / not in `ps` | The resume likely never executed in that tab; check the tab and re-run for that session |
 | Wrong sessions excluded as ntm | `--include-ntm`, or point `--ntm-history` at the right file |
-| `cod` / `cc` not found in tab | Confirm the aliases work in a normal Ghostty tab (`.zshrc`) |
+| `codex` / `claude` (or `cod` / `cc`) not found in tab | Run `pfr --doctor`; confirm the command works in a normal Ghostty tab, or set `PFR_CODEX_CMD` / `PFR_CLAUDE_CMD` |
 | AppleScript errors | System Settings → Privacy → Automation: allow your terminal → Ghostty |
 | Stale plan refused | Rediscover, or `--force-stale-plan` |
 | Installer: `refusing to replace unrelated path: ~/.local/bin/pfr` | The file there is not a byte-identical copy of the install root's launcher. Compare both with `shasum -a 256`; if it is yours, move it aside and re-run |
@@ -383,7 +383,7 @@ power_failure_resumer/
 ## FAQ
 
 **Will it double-open sessions I already resumed by hand?**
-No. Discovery checks `ps` for live `cod`/`cc` invocations resuming those exact UUIDs and skips them. Override with `--force-reopen`.
+No. Discovery checks `ps` for live `codex`/`claude` (or `cod`/`cc`) invocations resuming those exact UUIDs and skips them. Override with `--force-reopen`.
 
 **What if I run pfr twice?**
 Same mechanism: the first run's sessions are now live in `ps`, so the second run skips them.

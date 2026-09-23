@@ -72,7 +72,8 @@ Compatibility targets:
 - Prefer arrays for command arguments; do not build commands for `eval`.
 - Validate numeric input before arithmetic or `sleep`.
 - Keep resume identifiers restricted to complete UUIDs.
-- Preserve interactive-shell execution for `cod` and `cc` aliases.
+- Preserve interactive-shell execution so `cod` / `cc` aliases and functions
+  still apply; resume commands default to the canonical `codex` / `claude`.
 - Human-readable diagnostics may use stderr; JSON modes must keep stdout valid
   JSON with no decorative output.
 - Bound external process calls with timeouts where practical.

@@ -720,8 +720,38 @@ def is_codex_subagent(meta_payload: dict) -> bool:
     return False
 
 
+# Launcher words for resume commands. The canonical CLI names are the default:
+# they need no shell aliases, and `cc` is the system C compiler on most Unix
+# systems. The pfr shell front end sets PFR_CODEX_CMD / PFR_CLAUDE_CMD to `cod`
+# / `cc` only when the user's interactive shell defines those names as an alias
+# or function (which usually carries the user's preferred agent flags); users
+# may also set them explicitly. The value is joined into a shell command, so it
+# must be one plain command word or absolute path — never escaped free text.
+CANONICAL_LAUNCHERS = {"codex": "codex", "claude": "claude"}
+LAUNCHER_ENV = {"codex": "PFR_CODEX_CMD", "claude": "PFR_CLAUDE_CMD"}
+LAUNCHER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,63}|/[A-Za-z0-9_.+/-]{1,1023}")
+
+
+def agent_launcher(provider: str, environ: Optional[Dict[str, str]] = None) -> str:
+    """Command word that starts `provider` in a resume command.
+
+    Raises ValueError for an unknown provider or an unsafe override value.
+    """
+    if provider not in CANONICAL_LAUNCHERS:
+        raise ValueError(f"unknown provider {provider!r}")
+    env = os.environ if environ is None else environ
+    value = env.get(LAUNCHER_ENV[provider]) or ""
+    if not value:
+        return CANONICAL_LAUNCHERS[provider]
+    if not LAUNCHER_RE.fullmatch(value):
+        raise ValueError(
+            f"{LAUNCHER_ENV[provider]} must be a plain command name or absolute path, got {value!r}"
+        )
+    return value
+
+
 def codex_resume_cmd(resume_id: str, model: str, effort: str) -> str:
-    cmd = f"cod resume {resume_id}"
+    cmd = f"{agent_launcher('codex')} resume {resume_id}"
     if model:
         cmd += f" -m {model}"
     if effort:
@@ -730,7 +760,7 @@ def codex_resume_cmd(resume_id: str, model: str, effort: str) -> str:
 
 
 def claude_resume_cmd(resume_id: str, model: str) -> str:
-    cmd = f"cc --resume {resume_id}"
+    cmd = f"{agent_launcher('claude')} --resume {resume_id}"
     if model:
         cmd += f" --model {model}"
     return cmd
@@ -1058,6 +1088,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Max sessions to return (0 = unlimited); keeps newest by mtime",
     )
     args = ap.parse_args(argv)
+    for provider in CANONICAL_LAUNCHERS:
+        try:
+            agent_launcher(provider)
+        except ValueError as exc:
+            ap.error(str(exc))
 
     nonnegative_floats = {
         "--window": args.window,

@@ -135,6 +135,10 @@ ENVIRONMENT:
   PFR_WINDOW, PFR_LOOKBACK_HOURS, PFR_PRE_BOOT_LOOKBACK, PFR_PROVIDERS,
   PFR_OPEN_MODE, PFR_DRIVER, PFR_DELAY, PFR_SETTLE, PFR_MAX_OPEN,
   PFR_NOTIFY_CMD (optional notification-command override)
+  PFR_CODEX_CMD, PFR_CLAUDE_CMD  Command word that starts each agent in resume
+                        commands (a plain name or absolute path). Default:
+                        `cod` / `cc` when your interactive login shell defines
+                        them as an alias or function, else `codex` / `claude`.
 
 EXAMPLES:
   ./power_failure_resumer.sh --dry-run
@@ -302,7 +306,7 @@ queue_open() {
 
 open_batch_ghostty() {
   # Linux: no scripting API — spawn one window per session via the ghostty CLI.
-  # Interactive shell (-i) so cod/cc aliases from rc files resolve.
+  # Interactive shell (-i) so cod/cc aliases/functions from rc files resolve.
   # Commands are reconstructed from provider + validated UUID at the JSON/TSV
   # boundary. Escaping the whole string with %q would turn it into one command
   # name containing spaces instead of a command plus arguments.
@@ -439,6 +443,86 @@ if (( ! NOTIFY )); then
   esac
 fi
 
+# ── agent launchers ─────────────────────────────────────────────────────────
+# Resume commands start with the canonical `codex` / `claude` CLIs, which need
+# no shell setup. When the user's interactive login shell (the kind resume tabs
+# run in) defines `cod` / `cc` as an alias or function, those are used instead
+# so the user's usual agent flags still apply. A plain `cc` executable — the
+# system C compiler — is never mistaken for Claude. PFR_CODEX_CMD and
+# PFR_CLAUDE_CMD override the choice per provider.
+AGENT_LAUNCHER_PROBE='for n in cod cc codex claude; do printf "\n__PFR_TYPE__ %s %s\n" "$n" "$(type "$n" 2>&1 | head -n 1)"; done'
+AGENT_PROBE_OUT=""
+AGENT_PROBE_RC=0
+AGENT_PROBE_DONE=0
+
+# Probe once per run, bounded: a hung rc file must not hang recovery.
+# Returns 127 when $SHELL is not executable, 124 on timeout.
+probe_agent_commands() {
+  if (( AGENT_PROBE_DONE )); then
+    return "$AGENT_PROBE_RC"
+  fi
+  AGENT_PROBE_DONE=1
+  local probe_shell="${SHELL:-/bin/zsh}"
+  if [[ ! -x "$probe_shell" ]]; then
+    AGENT_PROBE_RC=127
+    return "$AGENT_PROBE_RC"
+  fi
+  if AGENT_PROBE_OUT="$(run_bounded 8 "$probe_shell" -lic "$AGENT_LAUNCHER_PROBE")"; then
+    AGENT_PROBE_RC=0
+  else
+    AGENT_PROBE_RC=$?
+  fi
+  return "$AGENT_PROBE_RC"
+}
+
+# How the probed shell resolves NAME: alias | function | command | missing | unknown.
+agent_command_kind() {
+  local name="$1" line desc
+  line="$(printf '%s\n' "$AGENT_PROBE_OUT" | grep -m 1 "^__PFR_TYPE__ ${name} " || true)"
+  if [[ -z "$line" ]]; then
+    echo unknown
+    return 0
+  fi
+  desc="${line#"__PFR_TYPE__ ${name} "}"
+  case "$desc" in
+    "$name is an alias"*|"$name is aliased"*|"$name is a global alias"*) echo alias ;;
+    "$name is a shell function"*|"$name is a function"*) echo function ;;
+    ""|*"not found"*) echo missing ;;
+    *) echo command ;;
+  esac
+}
+
+# The launcher is joined into a shell command, so it must be one plain word.
+valid_launcher() {
+  # Same shapes as discover.LAUNCHER_RE. macOS regex caps {m,n} at 255, so the
+  # path length is checked separately.
+  local re_name='^[A-Za-z0-9_][A-Za-z0-9_.+-]{0,63}$' re_path='^/[A-Za-z0-9_.+/-]+$'
+  [[ "$1" =~ $re_name ]] || { [[ "$1" =~ $re_path ]] && (( ${#1} <= 1024 )); }
+}
+
+# Sets and exports PFR_CODEX_CMD / PFR_CLAUDE_CMD for discover.py, plan.py and
+# the command reconstruction below. Explicit values skip the shell probe.
+resolve_agent_launchers() {
+  local provider short var value
+  for provider in codex claude; do
+    if [[ "$provider" == "codex" ]]; then
+      short="cod"; var="PFR_CODEX_CMD"
+    else
+      short="cc"; var="PFR_CLAUDE_CMD"
+    fi
+    value="${!var:-}"
+    if [[ -z "$value" ]]; then
+      value="$provider"
+      probe_agent_commands || true
+      case "$(agent_command_kind "$short")" in
+        alias|function) value="$short" ;;
+      esac
+    fi
+    valid_launcher "$value" || die "$var must be a plain command name or absolute path (got: $value)"
+    export "$var=$value"
+  done
+}
+
 # ── doctor ──────────────────────────────────────────────────────────────────
 # Environment health checks. PFR_DOCTOR_SIM_MISSING="ghostty,osascript" lets
 # tests simulate absent dependencies.
@@ -539,19 +623,46 @@ doctor_run() {
   fi
   # Probe the user's login shell (the same kind resume tabs run in), with a
   # hard time bound: a hung rc file must not hang the doctor.
-  local agent_cmds probe_shell probe_rc
-  probe_shell="${SHELL:-/bin/zsh}"
-  if [[ ! -x "$probe_shell" ]]; then
-    add_check agent_commands warn "login shell not executable ($probe_shell); cannot probe cod/cc"
-  elif agent_cmds="$(run_bounded 8 "$probe_shell" -lic 'type cod; type cc')"; then
-    add_check agent_commands ok "$agent_cmds"
+  local probe_rc=0 provider short var value kind detail status
+  probe_agent_commands || probe_rc=$?
+  if [[ "$probe_rc" -eq 127 ]]; then
+    add_check agent_commands warn "login shell not executable (${SHELL:-/bin/zsh}); cannot probe agent commands"
+  elif [[ "$probe_rc" -eq 124 ]]; then
+    add_check agent_commands warn "login-shell probe timed out after 8s (slow rc files?); check skipped"
   else
-    probe_rc=$?
-    if [[ "$probe_rc" -eq 124 ]]; then
-      add_check agent_commands warn "login-shell probe timed out after 8s (slow rc files?); check skipped"
-    else
-      add_check agent_commands warn "cod/cc not both resolvable in login shell ($probe_shell): $agent_cmds"
-    fi
+    status="ok"
+    detail=""
+    for provider in codex claude; do
+      if [[ "$provider" == "codex" ]]; then
+        short="cod"; var="PFR_CODEX_CMD"
+      else
+        short="cc"; var="PFR_CLAUDE_CMD"
+      fi
+      value="${!var:-}"
+      if [[ -n "$value" ]]; then
+        if ! valid_launcher "$value"; then
+          status="fail"; detail+="${provider}: invalid ${var} '${value}'; "
+          continue
+        fi
+        case "$value" in
+          cod|cc|codex|claude) kind="$(agent_command_kind "$value")" ;;
+          /*) if [[ -x "$value" ]]; then kind="command"; else kind="missing"; fi ;;
+          *) kind="unprobed" ;;
+        esac
+        detail+="${provider}: ${value} (${var}, ${kind}); "
+      else
+        kind="$(agent_command_kind "$short")"
+        case "$kind" in
+          alias|function) value="$short" ;;
+          *) value="$provider"; kind="$(agent_command_kind "$provider")" ;;
+        esac
+        detail+="${provider}: ${value} (${kind}); "
+      fi
+      if [[ "$kind" == "missing" || "$kind" == "unknown" ]]; then
+        [[ "$status" == "fail" ]] || status="warn"
+      fi
+    done
+    add_check agent_commands "$status" "${detail%; }"
   fi
 
   local fails=0 i
@@ -627,6 +738,11 @@ fi
 
 need_cmd python3
 [[ -f "$DISCOVER_PY" ]] || die "missing $DISCOVER_PY"
+# --notify only saves a plan (loading it rebuilds commands), so it skips the
+# interactive-shell probe; explicit overrides are still validated downstream.
+if (( ! NOTIFY )); then
+  resolve_agent_launchers
+fi
 if (( ! DRY_RUN && ! JSON_OUT && ! NOTIFY )); then
   case "$DRIVER" in
     ui|api)
@@ -804,9 +920,18 @@ trap 'cleanup_files "$SESS_FILE" "$SELECTED_FILE" "$MAP_FILE" "$ORDERED_FILE" "$
 # Feed JSON over stdin. Environment variables share the execve ARG_MAX budget,
 # so putting a large discovery payload in PFR_JSON can fail on wide clusters.
 META="$(
-  PFR_SESS_OUT="$SESS_FILE" python3 /dev/fd/3 <<<"$JSON" 3<<'PY'
+  PFR_SESS_OUT="$SESS_FILE" PFR_LIB_DIR="${ROOT}/lib" python3 /dev/fd/3 <<<"$JSON" 3<<'PY'
 import json, os, re, sys, unicodedata
 from datetime import date, datetime
+
+sys.path.insert(0, os.environ["PFR_LIB_DIR"])
+from discover import agent_launcher  # noqa: E402
+
+try:
+    launchers = {provider: agent_launcher(provider) for provider in ("codex", "claude")}
+except ValueError as e:
+    print(f"invalid agent launcher: {e}", file=sys.stderr)
+    sys.exit(1)
 
 try:
     data = json.load(sys.stdin)
@@ -860,13 +985,13 @@ for index, s in enumerate(sessions):
         print(f"invalid session effort at index {index}: {effort!r}", file=sys.stderr)
         sys.exit(1)
     if provider == "codex":
-        resume_cmd = f"cod resume {sid}"
+        resume_cmd = f"{launchers['codex']} resume {sid}"
         if model:
             resume_cmd += f" -m {model}"
         if effort:
             resume_cmd += f" -c model_reasoning_effort={effort}"
     else:
-        resume_cmd = f"cc --resume {sid}"
+        resume_cmd = f"{launchers['claude']} --resume {sid}"
         if model:
             resume_cmd += f" --model {model}"
     try:
@@ -1204,7 +1329,7 @@ else
       log "report:        ${STATE_DIR}/last-report.json"
       if [[ -n "$UNVERIFIED" ]]; then
         warn "no process evidence for: ${UNVERIFIED}"
-        warn "check those tabs — the resume command may have failed (cod/cc missing, or the agent exited early)."
+        warn "check those tabs — the resume command may have failed (agent command missing, or the agent exited early)."
       fi
     fi
   fi

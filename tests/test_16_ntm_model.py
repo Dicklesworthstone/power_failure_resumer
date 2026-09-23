@@ -116,12 +116,12 @@ def main() -> None:
     cod = by_id[CODEX_UUID_TOP]
     assert cod["model"] == "gpt-5.6-sol" and cod["effort"] == "ultra", cod
     assert cod["resume_cmd"] == (
-        f"cod resume {CODEX_UUID_TOP} -m gpt-5.6-sol -c model_reasoning_effort=ultra"
+        f"codex resume {CODEX_UUID_TOP} -m gpt-5.6-sol -c model_reasoning_effort=ultra"
     ), cod["resume_cmd"]
     cc = by_id[CLAUDE_UUID_TOP]
     assert cc["model"] == "claude-fable-5", cc
     assert cc["resume_cmd"] == (
-        f"cc --resume {CLAUDE_UUID_TOP} --model claude-fable-5"
+        f"claude --resume {CLAUDE_UUID_TOP} --model claude-fable-5"
     ), cc["resume_cmd"]
 
     # Plans must carry model/effort/is_ntm through build_plan (regression:

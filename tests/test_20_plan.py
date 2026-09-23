@@ -229,8 +229,33 @@ class PlanCliRoundtripTest(unittest.TestCase):
         loaded = json.loads(r.stdout)
         self.assertEqual(
             loaded["sessions"][0]["resume_cmd"],
-            "cod resume 019f0000-0000-7000-8000-00000000c001",
+            "codex resume 019f0000-0000-7000-8000-00000000c001",
         )
+
+    def test_load_uses_launcher_overrides(self):
+        td = self.new_state_dir("launchers")
+        r = self.run_plan(["save", "--state-dir", str(td)],
+                          stdin_text=json.dumps(fake_discovery()))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        last = str(td / "last-plan.json")
+        env = {"PFR_CODEX_CMD": "", "PFR_CLAUDE_CMD": ""}
+        r = self.run_plan(["load", "--path", last, "--fake-boot", str(BOOT)], env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cmds = {s["provider"]: s["resume_cmd"].split()[0] for s in json.loads(r.stdout)["sessions"]}
+        self.assertEqual(cmds, {"codex": "codex", "claude": "claude"})
+
+        env = {"PFR_CODEX_CMD": "cod", "PFR_CLAUDE_CMD": "/opt/agents/bin/claude"}
+        r = self.run_plan(["load", "--path", last, "--fake-boot", str(BOOT)], env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cmds = {s["provider"]: s["resume_cmd"].split()[0] for s in json.loads(r.stdout)["sessions"]}
+        self.assertEqual(cmds, {"codex": "cod", "claude": "/opt/agents/bin/claude"})
+
+        for bad in ("cod; touch /tmp/x", "claude --yolo", "$(id)", "~/bin/cc", "rel/path"):
+            r = self.run_plan(["load", "--path", last, "--fake-boot", str(BOOT)],
+                              env={"PFR_CODEX_CMD": "", "PFR_CLAUDE_CMD": bad})
+            self.assertEqual(r.returncode, 2, (bad, r.stdout, r.stderr))
+            self.assertIn("PFR_CLAUDE_CMD", r.stderr)
+            self.assertEqual(r.stdout, "")
 
     def test_extra_only_does_not_create_state_plan(self):
         td = self.new_state_dir("extra-only")

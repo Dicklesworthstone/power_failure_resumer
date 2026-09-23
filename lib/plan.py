@@ -32,7 +32,14 @@ from typing import Dict, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import confidence  # noqa: E402
-from discover import EFFORT_RE, MODEL_RE, UUID_RE, fmt_ts, get_boot_time  # noqa: E402
+from discover import (  # noqa: E402
+    EFFORT_RE,
+    MODEL_RE,
+    UUID_RE,
+    agent_launcher,
+    fmt_ts,
+    get_boot_time,
+)
 
 ARCHIVE_KEEP = 20
 STALE_AGE_SECONDS = 24 * 3600.0
@@ -293,6 +300,12 @@ def cmd_load(args: argparse.Namespace) -> int:
     if current_boot is None:
         current_boot = get_boot_time()
 
+    try:
+        launchers = {provider: agent_launcher(provider) for provider in ("codex", "claude")}
+    except ValueError as exc:
+        eprint(f"error: {exc}")
+        return 2
+
     problems = staleness(plan, time.time(), current_boot)
     if problems and not args.force:
         for p in problems:
@@ -311,13 +324,13 @@ def cmd_load(args: argparse.Namespace) -> int:
         model = entry.get("model") or ""
         effort = entry.get("effort") or ""
         if entry["provider"] == "codex":
-            cmd = f"cod resume {sid}"
+            cmd = f"{launchers['codex']} resume {sid}"
             if model:
                 cmd += f" -m {model}"
             if effort:
                 cmd += f" -c model_reasoning_effort={effort}"
         else:
-            cmd = f"cc --resume {sid}"
+            cmd = f"{launchers['claude']} --resume {sid}"
             if model:
                 cmd += f" --model {model}"
         entry["resume_cmd"] = cmd

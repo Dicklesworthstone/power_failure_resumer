@@ -12,6 +12,15 @@ FAKE_BOOT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['fak
 FIX_ARGS=(--codex-root "$FIX/codex" --claude-root "$FIX/claude"
           --fake-boot "$FAKE_BOOT" --lookback-hours 8760000)
 
+# Deterministic agent-command probing: resume commands depend on whether the
+# user's login shell defines `cod` / `cc`, so tests use a stand-in shell whose
+# only rc file is $PFR_TEST_SHELL_RC (none by default) instead of the developer's
+# dotfiles. The live Ghostty test keeps the real shell.
+if [[ "${PFR_LIVE:-}" != "1" ]]; then
+  export SHELL="$PFR_ROOT/tests/fixtures/fake_login_shell.sh"
+  unset PFR_CODEX_CMD PFR_CLAUDE_CMD
+fi
+
 # Deterministic runs: no agent-mail or status tab unless a test opts in.
 export PFR_AM=0
 export PFR_STATUS_TAB=0

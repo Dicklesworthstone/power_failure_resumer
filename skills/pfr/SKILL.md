@@ -67,7 +67,7 @@ Fresh discovery is important after a partial launch: it skips exact UUIDs that a
 ## Diagnose failures
 
 - Tab shows a bare shell: the native command launch failed and the keystroke fallback did not deliver. Check Automation (and Accessibility for the fallback) in System Settings, read the per-tab failure reason printed at open time, then retry fresh discovery.
-- `cod` / `cc` missing in tabs: run `zsh -lic 'type cod; type cc'` and inspect the shell startup files. Resume commands run in `$SHELL -il -c`, so anything broken in login-shell init breaks resumes.
+- Agent command missing in tabs: run `pfr --doctor` (the `agent_commands` check shows the command each provider starts with). Resumes use `cod` / `cc` only when the login shell defines them as an alias or function, otherwise `codex` / `claude`; `PFR_CODEX_CMD` / `PFR_CLAUDE_CMD` choose explicitly. Resume commands run in `$SHELL -il -c`, so anything broken in login-shell init breaks resumes.
 - Codex warns about a model mismatch on resume: the plan predates model pinning or the transcript had no recorded model. Re-run discovery so the resume command pins the recorded model and effort.
 - macOS launch failure: check Automation permission first; Accessibility is needed only for the keystroke fallback. Use `--driver api` to disable that fallback.
 - Linux tab request: expect Ghostty CLI windows; it cannot target existing tabs, so `--tabs` is coerced to windows.

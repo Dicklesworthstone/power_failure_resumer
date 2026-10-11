@@ -132,13 +132,13 @@ draw_box() {
   local color="$1"; shift
   local lines=("$@") width=0 stripped line esc border="" i
   esc="$(printf '\033')"
-  for line in "${lines[@]}"; do
+  for line in ${lines[@]+"${lines[@]}"}; do
     stripped="$(printf '%s' "$line" | LC_ALL=C sed "s/${esc}\\[[0-9;]*m//g")"
     (( ${#stripped} > width )) && width=${#stripped}
   done
   for ((i=0; i<width + 2; i++)); do border+="═"; done
   printf '\033[%sm╔%s╗\033[0m\n' "$color" "$border"
-  for line in "${lines[@]}"; do
+  for line in ${lines[@]+"${lines[@]}"}; do
     stripped="$(printf '%s' "$line" | LC_ALL=C sed "s/${esc}\\[[0-9;]*m//g")"
     printf '\033[%sm║\033[0m %s%*s \033[%sm║\033[0m\n' \
       "$color" "$line" $((width - ${#stripped})) "" "$color"
@@ -342,7 +342,7 @@ preflight() {
     fi
   fi
   if [[ -z "$OFFLINE" ]]; then
-    if ! curl -fsSL "${PROXY_ARGS[@]}" --connect-timeout 5 -o /dev/null \
+    if ! curl -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} --connect-timeout 5 -o /dev/null \
         "https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/${REF}" 2>/dev/null; then
       warn "network check to GitHub failed — download may not work (try --offline)"
     fi
@@ -391,7 +391,7 @@ fetch_tree() {
   else
     local url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/${REF}"
     run_with_spinner "Downloading ${REPO_NAME}@${REF}" \
-      curl --proto '=https' --tlsv1.2 -fsSL "${PROXY_ARGS[@]}" -o "$tarball" "$url" \
+      curl --proto '=https' --tlsv1.2 -fsSL ${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"} -o "$tarball" "$url" \
       || { err "download failed: $url"; exit 1; }
   fi
   info "Validating and extracting archive"
@@ -632,9 +632,9 @@ summary() {
   fi
   if use_gum; then
     gum style --border rounded --border-foreground 42 --padding "0 2" --margin "1 0" \
-      "${lines[@]}"
+      ${lines[@]+"${lines[@]}"}
   else
-    draw_box "0;32" "${lines[@]}"
+    draw_box "0;32" ${lines[@]+"${lines[@]}"}
   fi
 }
 
